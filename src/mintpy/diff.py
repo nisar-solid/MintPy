@@ -275,12 +275,13 @@ def diff_ifgram_stack(file1, file2, out_file):
 
     # consider reference pixel
     if 'unwrapphase' in ds_name.lower():
-        print(f'referencing to pixel ({obj1.refY},{obj1.refX}) ...')
-        ref1 = data1[:, obj1.refY, obj1.refX]
-        ref2 = data2[:, obj2.refY, obj2.refX]
-        for i in range(data1.shape[0]):
-            data1[i,:][data1[i, :] != 0.] -= ref1[i]
-            data2[i,:][data2[i, :] != 0.] -= ref2[i]
+        if all((obj1.refY is not None, obj1.refX is not None)):
+            print(f'referencing to pixel ({obj1.refY},{obj1.refX}) ...')
+            ref1 = data1[:, obj1.refY, obj1.refX]
+            ref2 = data2[:, obj2.refY, obj2.refX]
+            for i in range(data1.shape[0]):
+                data1[i,:][data1[i, :] != 0.] -= ref1[i]
+                data2[i,:][data2[i, :] != 0.] -= ref2[i]
 
     # operation and ignore zero values
     data1[data1 == 0] = np.nan
