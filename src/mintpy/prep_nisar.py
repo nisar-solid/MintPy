@@ -44,7 +44,7 @@ PROCESSINFO = {
     'end_time'       : f"{IDENTIFICATION}/referenceZeroDopplerEndTime",
     'rdr_xcoord'     : f"{RADARGRID_ROOT}/xCoordinates",
     'rdr_ycoord'     : f"{RADARGRID_ROOT}/yCoordinates",
-    'rdr_slant_range': f"{RADARGRID_ROOT}/slantRange",
+    'rdr_slant_range': f"{RADARGRID_ROOT}/referenceSlantRange",
     'rdr_height'     : f"{RADARGRID_ROOT}/heightAboveEllipsoid",
     'rdr_incidence'  : f"{RADARGRID_ROOT}/incidenceAngle",
     'bperp'          : f"{RADARGRID_ROOT}/perpendicularBaseline",
