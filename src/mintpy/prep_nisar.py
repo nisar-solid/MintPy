@@ -275,10 +275,20 @@ def read_and_interpolate_geometry(gunw_file, dem_file, xybbox, mask_file=None):
     # Warp DEM to the interferograms grid
     input_projection = f"EPSG:{dem_src_epsg}"
     output_dem = os.path.join(os.path.dirname(dem_file), 'dem_transformed.tif' )
-    gdal.Warp(output_dem, dem_file, outputBounds=bounds, format='GTiff',
-              srcSRS=input_projection, dstSRS=output_projection, resampleAlg=gdal.GRA_Bilinear,
-              width=subset_cols, height=subset_rows,
-              options=['COMPRESS=DEFLATE'])
+
+    warp_opts = gdal.WarpOptions(
+        format="GTiff",
+        outputBounds=bounds,
+        srcSRS=input_projection,
+        dstSRS=output_projection,
+        resampleAlg="bilinear",
+        width=subset_cols, height=subset_rows,
+        creationOptions=["COMPRESS=DEFLATE"]
+    )
+
+    gdal.Warp(destNameOrDestDS=output_dem,
+              srcDSOrSrcDSTab=dem_file,
+              options=warp_opts)
 
     dem_subset_array =  gdal.Open(output_dem, gdal.GA_ReadOnly).ReadAsArray()
 
