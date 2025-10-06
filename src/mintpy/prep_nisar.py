@@ -28,7 +28,8 @@ DATASETS = {
     'unw'              : f"{DATASET_ROOT_UNW}/POL/unwrappedPhase",
     'cor'              : f"{DATASET_ROOT_UNW}/POL/coherenceMagnitude",
     'connComp'         : f"{DATASET_ROOT_UNW}/POL/connectedComponents",
-    #'mask'             : f"{DATASET_ROOT_UNW}/mask",
+    'ion'              : f"{DATASET_ROOT_UNW}/POL/ionospherePhaseScreen",
+    'mask'             : f"{DATASET_ROOT_UNW}/mask",
     'epsg'             : f"{DATASET_ROOT_UNW}/projection",
     'xSpacing'         : f"{DATASET_ROOT_UNW}/xCoordinateSpacing",
     'ySpacing'         : f"{DATASET_ROOT_UNW}/yCoordinateSpacing",
@@ -71,6 +72,7 @@ def load_nisar(inps):
     # output filename
     stack_file = os.path.join(inps.out_dir, "inputs/ifgramStack.h5")
     geometry_file = os.path.join(inps.out_dir, "inputs/geometryGeo.h5")
+    ion_stack_file = os.path.join(inps.out_dir, "inputs/ionStack.h5")
 
     # get date info: date12_list
     date12_list = _get_date_pairs(input_files)
@@ -92,6 +94,14 @@ def load_nisar(inps):
         date12_list=date12_list,
     )
 
+    # Load ionosphere layer
+    prepare_stack(
+        outfile=ion_stack_file,
+        inp_files=input_files,
+        metadata=metadata,
+        bbox=bounds,
+        date12_list=date12_list,
+    )
     print("Done.")
 
     return
@@ -239,6 +249,7 @@ def read_subset(inp_file, bbox, geometry=False):
             dataset['cor_data'] = ds[DATASETS['cor']][row1:row2, col1:col2]
             dataset['conn_comp'] = (ds[DATASETS['connComp']][row1:row2, col1:col2]).astype(np.float32)
             dataset['conn_comp'][dataset['conn_comp'] > 254] = np.nan
+            dataset['ion_data'] = ds[DATASETS['ion']][row1:row2, col1:col2]
             dataset['pbase'] = np.nanmean(ds[PROCESSINFO['bperp']][()])
     return dataset
 
@@ -436,26 +447,47 @@ def prepare_stack(
 
     # writing data to HDF5 file
     print(f"writing data to HDF5 file {outfile} with a mode ...")
+    if "inputs/ifgramStack.h5" in outfile:
+        with h5py.File(outfile, "a") as f:
+            prog_bar = ptime.progressBar(maxValue=num_pair)
+            for i, file in enumerate(inp_files):
+                dataset = read_subset(file, bbox)
 
-    with h5py.File(outfile, "a") as f:
-        prog_bar = ptime.progressBar(maxValue=num_pair)
-        for i, file in enumerate(inp_files):
-            dataset = read_subset(file, bbox)
+                # read/write *.unw file
+                f["unwrapPhase"][i] = dataset['unw_data']
 
-            # read/write *.unw file
-            f["unwrapPhase"][i] = dataset['unw_data']
+                # read/write *.cor file
+                f["coherence"][i] = dataset['cor_data']
 
-            # read/write *.cor file
-            f["coherence"][i] = dataset['cor_data']
+                # read/write *.unw.conncomp file
+                f["connectComponent"][i] = dataset['conn_comp']
 
-            # read/write *.unw.conncomp file
-            f["connectComponent"][i] = dataset['conn_comp']
+                # read/write perpendicular baseline file
+                f['bperp'][i] = dataset['pbase']
 
-            # read/write perpendicular baseline file
-            f['bperp'][i] = dataset['pbase']
+                prog_bar.update(i + 1, suffix=date12_list[i])
+    else:
+        import pdb
+        pdb.set_trace()
+        with h5py.File(outfile, "a") as f:
+            prog_bar = ptime.progressBar(maxValue=num_pair)
+            for i, file in enumerate(inp_files):
+                dataset = read_subset(file, bbox)
 
-            prog_bar.update(i + 1, suffix=date12_list[i])
-        prog_bar.close()
+                # read/write *.unw file
+                f["unwrapPhase"][i] = dataset['ion_data']
+
+                # read/write *.cor file
+                f["coherence"][i] = dataset['cor_data']
+
+                # read/write *.unw.conncomp file
+                f["connectComponent"][i] = dataset['conn_comp']
+
+                # read/write perpendicular baseline file
+                f['bperp'][i] = dataset['pbase']
+
+                prog_bar.update(i + 1, suffix=date12_list[i])
+    prog_bar.close()
 
     print(f"finished writing to HDF5 file: {outfile}")
     return outfile
