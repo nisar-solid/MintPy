@@ -362,7 +362,7 @@ def interpolate_geometry(X_2d, Y_2d, dem, rdr_coords):
 
 def _get_date_pairs(filenames):
     str_list = [Path(f).stem for f in filenames]
-    return [str(f.split('_')[13]) + '_' + str(f.split('_')[11]) for f in str_list]
+    return [str(f.split('_')[13].split('T')[0]) + '_' + str(f.split('_')[11].split('T')[0]) for f in str_list]
 
 
 def prepare_geometry(
@@ -467,8 +467,6 @@ def prepare_stack(
 
                 prog_bar.update(i + 1, suffix=date12_list[i])
     else:
-        import pdb
-        pdb.set_trace()
         with h5py.File(outfile, "a") as f:
             prog_bar = ptime.progressBar(maxValue=num_pair)
             for i, file in enumerate(inp_files):
