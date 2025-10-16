@@ -28,7 +28,8 @@ DATASETS = {
     'unw'              : f"{DATASET_ROOT_UNW}/POL/unwrappedPhase",
     'cor'              : f"{DATASET_ROOT_UNW}/POL/coherenceMagnitude",
     'connComp'         : f"{DATASET_ROOT_UNW}/POL/connectedComponents",
-    #'mask'             : f"{DATASET_ROOT_UNW}/mask",
+    'ion'              : f"{DATASET_ROOT_UNW}/POL/ionospherePhaseScreen",
+    'mask'             : f"{DATASET_ROOT_UNW}/mask",
     'epsg'             : f"{DATASET_ROOT_UNW}/projection",
     'xSpacing'         : f"{DATASET_ROOT_UNW}/xCoordinateSpacing",
     'ySpacing'         : f"{DATASET_ROOT_UNW}/yCoordinateSpacing",
@@ -44,7 +45,7 @@ PROCESSINFO = {
     'end_time'       : f"{IDENTIFICATION}/referenceZeroDopplerEndTime",
     'rdr_xcoord'     : f"{RADARGRID_ROOT}/xCoordinates",
     'rdr_ycoord'     : f"{RADARGRID_ROOT}/yCoordinates",
-    'rdr_slant_range': f"{RADARGRID_ROOT}/slantRange",
+    'rdr_slant_range': f"{RADARGRID_ROOT}/referenceSlantRange",
     'rdr_height'     : f"{RADARGRID_ROOT}/heightAboveEllipsoid",
     'rdr_incidence'  : f"{RADARGRID_ROOT}/incidenceAngle",
     'bperp'          : f"{RADARGRID_ROOT}/perpendicularBaseline",
@@ -71,6 +72,7 @@ def load_nisar(inps):
     # output filename
     stack_file = os.path.join(inps.out_dir, "inputs/ifgramStack.h5")
     geometry_file = os.path.join(inps.out_dir, "inputs/geometryGeo.h5")
+    ion_stack_file = os.path.join(inps.out_dir, "inputs/ionStack.h5")
 
     # get date info: date12_list
     date12_list = _get_date_pairs(input_files)
@@ -92,6 +94,14 @@ def load_nisar(inps):
         date12_list=date12_list,
     )
 
+    # Load ionosphere layer
+    prepare_stack(
+        outfile=ion_stack_file,
+        inp_files=input_files,
+        metadata=metadata,
+        bbox=bounds,
+        date12_list=date12_list,
+    )
     print("Done.")
 
     return
@@ -239,6 +249,7 @@ def read_subset(inp_file, bbox, geometry=False):
             dataset['cor_data'] = ds[DATASETS['cor']][row1:row2, col1:col2]
             dataset['conn_comp'] = (ds[DATASETS['connComp']][row1:row2, col1:col2]).astype(np.float32)
             dataset['conn_comp'][dataset['conn_comp'] > 254] = np.nan
+            dataset['ion_data'] = ds[DATASETS['ion']][row1:row2, col1:col2]
             dataset['pbase'] = np.nanmean(ds[PROCESSINFO['bperp']][()])
     return dataset
 
@@ -275,10 +286,20 @@ def read_and_interpolate_geometry(gunw_file, dem_file, xybbox, mask_file=None):
     # Warp DEM to the interferograms grid
     input_projection = f"EPSG:{dem_src_epsg}"
     output_dem = os.path.join(os.path.dirname(dem_file), 'dem_transformed.tif' )
-    gdal.Warp(output_dem, dem_file, outputBounds=bounds, format='GTiff',
-              srcSRS=input_projection, dstSRS=output_projection, resampleAlg=gdal.GRA_Bilinear,
-              width=subset_cols, height=subset_rows,
-              options=['COMPRESS=DEFLATE'])
+
+    warp_opts = gdal.WarpOptions(
+        format="GTiff",
+        outputBounds=bounds,
+        srcSRS=input_projection,
+        dstSRS=output_projection,
+        resampleAlg="bilinear",
+        width=subset_cols, height=subset_rows,
+        creationOptions=["COMPRESS=DEFLATE"]
+    )
+
+    gdal.Warp(destNameOrDestDS=output_dem,
+              srcDSOrSrcDSTab=dem_file,
+              options=warp_opts)
 
     dem_subset_array =  gdal.Open(output_dem, gdal.GA_ReadOnly).ReadAsArray()
 
@@ -341,7 +362,7 @@ def interpolate_geometry(X_2d, Y_2d, dem, rdr_coords):
 
 def _get_date_pairs(filenames):
     str_list = [Path(f).stem for f in filenames]
-    return [str(f.split('_')[13]) + '_' + str(f.split('_')[11]) for f in str_list]
+    return [str(f.split('_')[13].split('T')[0]) + '_' + str(f.split('_')[11].split('T')[0]) for f in str_list]
 
 
 def prepare_geometry(
@@ -426,26 +447,45 @@ def prepare_stack(
 
     # writing data to HDF5 file
     print(f"writing data to HDF5 file {outfile} with a mode ...")
+    if "inputs/ifgramStack.h5" in outfile:
+        with h5py.File(outfile, "a") as f:
+            prog_bar = ptime.progressBar(maxValue=num_pair)
+            for i, file in enumerate(inp_files):
+                dataset = read_subset(file, bbox)
 
-    with h5py.File(outfile, "a") as f:
-        prog_bar = ptime.progressBar(maxValue=num_pair)
-        for i, file in enumerate(inp_files):
-            dataset = read_subset(file, bbox)
+                # read/write *.unw file
+                f["unwrapPhase"][i] = dataset['unw_data']
 
-            # read/write *.unw file
-            f["unwrapPhase"][i] = dataset['unw_data']
+                # read/write *.cor file
+                f["coherence"][i] = dataset['cor_data']
 
-            # read/write *.cor file
-            f["coherence"][i] = dataset['cor_data']
+                # read/write *.unw.conncomp file
+                f["connectComponent"][i] = dataset['conn_comp']
 
-            # read/write *.unw.conncomp file
-            f["connectComponent"][i] = dataset['conn_comp']
+                # read/write perpendicular baseline file
+                f['bperp'][i] = dataset['pbase']
 
-            # read/write perpendicular baseline file
-            f['bperp'][i] = dataset['pbase']
+                prog_bar.update(i + 1, suffix=date12_list[i])
+    else:
+        with h5py.File(outfile, "a") as f:
+            prog_bar = ptime.progressBar(maxValue=num_pair)
+            for i, file in enumerate(inp_files):
+                dataset = read_subset(file, bbox)
 
-            prog_bar.update(i + 1, suffix=date12_list[i])
-        prog_bar.close()
+                # read/write *.unw file
+                f["unwrapPhase"][i] = dataset['ion_data']
+
+                # read/write *.cor file
+                f["coherence"][i] = dataset['cor_data']
+
+                # read/write *.unw.conncomp file
+                f["connectComponent"][i] = dataset['conn_comp']
+
+                # read/write perpendicular baseline file
+                f['bperp'][i] = dataset['pbase']
+
+                prog_bar.update(i + 1, suffix=date12_list[i])
+    prog_bar.close()
 
     print(f"finished writing to HDF5 file: {outfile}")
     return outfile
