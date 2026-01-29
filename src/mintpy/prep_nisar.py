@@ -48,6 +48,8 @@ PROCESSINFO = {
     'rdr_slant_range': f"{RADARGRID_ROOT}/referenceSlantRange",
     'rdr_height'     : f"{RADARGRID_ROOT}/heightAboveEllipsoid",
     'rdr_incidence'  : f"{RADARGRID_ROOT}/incidenceAngle",
+    'rdr_wet_tropo'  : f"{RADARGRID_ROOT}/wetTroposphericPhaseScreen",
+    'rdr_hs_tropo'   : f"{RADARGRID_ROOT}/hydrostaticTroposphericPhaseScreen",
     'bperp'          : f"{RADARGRID_ROOT}/perpendicularBaseline",
 }
 
@@ -73,6 +75,7 @@ def load_nisar(inps):
     stack_file = os.path.join(inps.out_dir, "inputs/ifgramStack.h5")
     geometry_file = os.path.join(inps.out_dir, "inputs/geometryGeo.h5")
     ion_stack_file = os.path.join(inps.out_dir, "inputs/ionStack.h5")
+    tropo_stack_file = os.path.join(inps.out_dir, "inputs/tropoStack.h5")
 
     # get date info: date12_list
     date12_list = _get_date_pairs(input_files)
@@ -90,6 +93,7 @@ def load_nisar(inps):
         outfile=stack_file,
         inp_files=input_files,
         metadata=metadata,
+        demFile=inps.dem_file,
         bbox=bounds,
         date12_list=date12_list,
     )
@@ -99,6 +103,17 @@ def load_nisar(inps):
         outfile=ion_stack_file,
         inp_files=input_files,
         metadata=metadata,
+        demFile=inps.dem_file,
+        bbox=bounds,
+        date12_list=date12_list,
+    )
+
+    # Load troposphere layer
+    prepare_stack(
+        outfile=tropo_stack_file,
+        inp_files=input_files,
+        metadata=metadata,
+        demFile=inps.dem_file,
         bbox=bounds,
         date12_list=date12_list,
     )
@@ -358,6 +373,117 @@ def interpolate_geometry(X_2d, Y_2d, dem, rdr_coords):
     return interpolated_slant_range.reshape(length, width), interpolated_incidence_angle.reshape(length, width)
 
 
+def read_and_interpolate_troposphere(gunw_file, dem_file, xybbox, mask_file=None):
+    """Read the DEM and mask, change projection and interpolate to data grid,
+       interpolate slant range and incidence angle to data grid"""
+    dem_dataset = gdal.Open(dem_file, gdal.GA_ReadOnly)
+    proj = gdal.osr.SpatialReference(wkt=dem_dataset.GetProjection())
+    dem_src_epsg = int(proj.GetAttrValue('AUTHORITY', 1))
+    del dem_dataset
+
+    rdr_coords = {}
+
+    with h5py.File(gunw_file, 'r') as ds:
+        dst_epsg = ds[DATASETS['epsg']][()]
+        xcoord = ds[DATASETS['xcoord']][xybbox[0]:xybbox[2]]
+        ycoord = ds[DATASETS['ycoord']][xybbox[1]:xybbox[3]]
+
+        rdr_coords['xcoord_radar_grid'] = ds[PROCESSINFO['rdr_xcoord']][()]
+        rdr_coords['ycoord_radar_grid'] = ds[PROCESSINFO['rdr_ycoord']][()]
+        rdr_coords['height_radar_grid'] = ds[PROCESSINFO['rdr_height']][()]
+        # rdr_coords['perp_baseline'] = ds[PROCESSINFO['bperp']][()]
+        rdr_coords['wet_tropo'] = ds[PROCESSINFO['rdr_wet_tropo']][()]
+        rdr_coords['hydrostatic_tropo'] = ds[PROCESSINFO['rdr_hs_tropo']][()]
+
+    subset_rows = len(ycoord)
+    subset_cols = len(xcoord)
+
+    Y_2d, X_2d = np.meshgrid(ycoord, xcoord, indexing='ij')
+    bounds = (min(xcoord), min(ycoord), max(xcoord), max(ycoord))
+    output_projection = f"EPSG:{dst_epsg}"
+
+    # Warp DEM to the interferograms grid
+    input_projection = f"EPSG:{dem_src_epsg}"
+    output_dem = os.path.join(os.path.dirname(dem_file), 'dem_transformed.tif' )
+
+    warp_opts = gdal.WarpOptions(
+        format="GTiff",
+        outputBounds=bounds,
+        srcSRS=input_projection,
+        dstSRS=output_projection,
+        resampleAlg="bilinear",
+        width=subset_cols, height=subset_rows,
+        creationOptions=["COMPRESS=DEFLATE"]
+    )
+
+    gdal.Warp(destNameOrDestDS=output_dem,
+              srcDSOrSrcDSTab=dem_file,
+              options=warp_opts)
+
+    dem_subset_array =  gdal.Open(output_dem, gdal.GA_ReadOnly).ReadAsArray()
+
+    # Calculate Total troposphere and then interpolate hydrostatic_tropo, wet_tropo and total_tropo
+    total_tropo = interpolate_troposphere(X_2d, Y_2d, dem_subset_array, rdr_coords)
+
+    # Read and warp mask if necessary
+    if mask_file in ['auto', 'None', None]:
+        print('*** No mask was found ***')
+        mask_subset_array = np.ones(dem_subset_array.shape, dtype='byte')
+    else:
+        try:
+            mask_dataset = gdal.Open(mask_file, gdal.GA_ReadOnly)
+            proj = gdal.osr.SpatialReference(wkt=mask_dataset.GetProjection())
+            mask_src_epsg = int(proj.GetAttrValue('AUTHORITY', 1))
+            del mask_dataset
+
+            # Warp mask to the interferograms grid
+            input_projection = f"EPSG:{mask_src_epsg}"
+            output_mask = os.path.join(os.path.dirname(mask_file), 'mask_transformed.tif' )
+            gdal.Warp(output_mask, mask_file, outputBounds=bounds, format='GTiff',
+              srcSRS=input_projection, dstSRS=output_projection, resampleAlg=gdal.GRA_Byte,
+              width=subset_cols, height=subset_rows,
+              options=['COMPRESS=DEFLATE'])
+
+            mask_subset_array = gdal.Open(output_mask, gdal.GA_ReadOnly).ReadAsArray()
+
+        except:
+            raise OSError('*** Mask is not gdal readable ***')
+
+
+    return total_tropo
+
+
+def interpolate_troposphere(X_2d, Y_2d, dem, rdr_coords):
+    """Interpolate slant range and incidence angle"""
+    pnts = np.stack((dem.flatten(), Y_2d.flatten(), X_2d.flatten()), axis=-1)
+    length, width = Y_2d.shape
+    
+    rdr_coords['total_tropo'] = rdr_coords['hydrostatic_tropo'] + rdr_coords['wet_tropo']
+
+    # build the interpolator
+    # interpolator = RegularGridInterpolator((rdr_coords['height_radar_grid'],
+    #                                         rdr_coords['ycoord_radar_grid'],
+    #                                         rdr_coords['xcoord_radar_grid']),
+    #                                         rdr_coords['hydrostatic_tropo'],
+    #                                         method='linear')
+
+    # interpolated_hydrostatic_tropo = interpolator(pnts)
+
+    # interpolator = RegularGridInterpolator((rdr_coords['height_radar_grid'],
+    #                                         rdr_coords['ycoord_radar_grid'],
+    #                                         rdr_coords['xcoord_radar_grid']),
+    #                                         rdr_coords['wet_tropo'],
+    #                                         method='linear')
+    # interpolated_wet_tropo = interpolator(pnts)
+
+    interpolator = RegularGridInterpolator((rdr_coords['height_radar_grid'],
+                                            rdr_coords['ycoord_radar_grid'],
+                                            rdr_coords['xcoord_radar_grid']),
+                                            rdr_coords['total_tropo'],
+                                            method='linear')
+    interpolated_total_tropo = interpolator(pnts)
+
+    return interpolated_total_tropo.reshape(length, width)
 ######################################
 
 def _get_date_pairs(filenames):
@@ -404,11 +530,50 @@ def prepare_geometry(
 
     return meta
 
+# def prepare_troposphere(
+#         outfile,
+#         metaFile,
+#         metadata,
+#         bbox,
+#         demFile,
+# ):
+#     """Prepare the geometry file."""
+#     print("-" * 50)
+#     print(f"preparing geometry file: {outfile}")
+
+#     # copy metadata to meta
+#     meta = {key: value for key, value in metadata.items()}
+
+#     # Read waterMask, LayoverShadowMask, xybbox:
+#     geo_ds = read_subset(metaFile, bbox, geometry=True)
+#     hydrostatic_tropo, wet_tropo, total_tropo = read_and_interpolate_troposphere(metaFile, demFile, 
+#                                                                  geo_ds['xybbox'])
+
+#     length, width = dem_subset_array.shape
+
+#     ds_name_dict = {
+#         "height": [np.float32, (length, width), dem_subset_array],
+#         "hydrostaticTroposphere": [np.float32, (length, width), hydrostatic_tropo],
+#         "wetTroposphere": [np.float32, (length, width), wet_tropo],
+#         "totalTroposphere": [np.float32, (length, width), total_tropo],
+#         #"shadowMask": [np.bool_, (length, width), geo_ds['mask']],
+#         #"waterMask": [np.bool_, (length, width), geo_ds['water_mask']],
+#     }
+#     # if maskFile:
+#     #     ds_name_dict['waterMask'] = [np.bool_, (length, width), mask]
+
+#     # initiate HDF5 file
+#     meta["FILE_TYPE"] = "ifgramStack"
+#     meta['STARTING_RANGE'] = np.nanmin(slant_range)
+#     writefile.layout_hdf5(outfile, ds_name_dict, metadata=meta)
+
+#     return meta
 
 def prepare_stack(
     outfile,
     inp_files,
     metadata,
+    demFile,
     bbox,
     date12_list
 ):
@@ -466,7 +631,8 @@ def prepare_stack(
                 f['bperp'][i] = dataset['pbase']
 
                 prog_bar.update(i + 1, suffix=date12_list[i])
-    else:
+    elif "inputs/ionStack.h5" in outfile:
+        print("DOING IONO")
         with h5py.File(outfile, "a") as f:
             prog_bar = ptime.progressBar(maxValue=num_pair)
             for i, file in enumerate(inp_files):
@@ -485,6 +651,27 @@ def prepare_stack(
                 f['bperp'][i] = dataset['pbase']
 
                 prog_bar.update(i + 1, suffix=date12_list[i])
+    elif "inputs/tropoStack.h5" in outfile:
+        print("DOING TROPO")
+        print("NEED TO MASK THE DATA")
+        with h5py.File(outfile, "a") as f:
+            prog_bar = ptime.progressBar(maxValue=num_pair)
+            for i, file in enumerate(inp_files):
+                geo_ds = read_subset(inp_files[0], bbox, geometry=True)
+                total_tropo = read_and_interpolate_troposphere(inp_files[0], demFile, geo_ds['xybbox'])
+
+                f["unwrapPhase"][i] = total_tropo
+
+                # # read/write *.cor file
+                # f["coherence"][i] = dataset['cor_data']
+
+                # # read/write *.unw.conncomp file
+                # f["connectComponent"][i] = dataset['conn_comp']
+
+                # # read/write perpendicular baseline file
+                # f['bperp'][i] = dataset['pbase']
+
+                prog_bar.update(i + 1, suffix=date12_list[i])                
     prog_bar.close()
 
     print(f"finished writing to HDF5 file: {outfile}")
