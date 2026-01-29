@@ -488,7 +488,7 @@ def interpolate_troposphere(X_2d, Y_2d, dem, rdr_coords):
 
 def _get_date_pairs(filenames):
     str_list = [Path(f).stem for f in filenames]
-    return [str(f.split('_')[13].split('T')[0]) + '_' + str(f.split('_')[11].split('T')[0]) for f in str_list]
+    return [str(f.split('_')[11].split('T')[0]) + '_' + str(f.split('_')[13].split('T')[0]) for f in str_list]
 
 
 def prepare_geometry(
