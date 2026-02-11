@@ -223,6 +223,18 @@ def load_nisar(inps):
         polarization=pol,
     )
 
+    # standalone water mask (MintPy format)
+    if getattr(inps, "mask_file", None) not in [None, "None", "auto"]:
+        water_mask_file = os.path.join(inps.out_dir, "waterMask.h5")
+        prepare_water_mask(
+            outfile=water_mask_file,
+            metaFile=input_files[0],
+            metadata=metadata,
+            bbox=bounds,
+            maskFile=inps.mask_file,
+            polarization=pol,
+        )
+
     # ifgram stack
     prepare_stack(
         outfile=stack_file,
@@ -674,6 +686,56 @@ def prepare_geometry(outfile, metaFile, metadata, bbox, demFile, maskFile, polar
     meta["STARTING_RANGE"] = float(np.nanmin(slant_range))
     writefile.layout_hdf5(outfile, ds_name_dict, metadata=meta)
     return meta
+
+
+def prepare_water_mask(
+    outfile, metaFile, metadata, bbox, maskFile, polarization="HH"
+):
+    """Prepare a standalone MintPy waterMask.h5 aligned to the NISAR grid."""
+    print("-" * 50)
+    print(f"preparing water mask file: {outfile}")
+
+    if not maskFile or maskFile in ["auto", "None", None]:
+        raise ValueError("maskFile must be a raster path (e.g., waterMask.msk)")
+
+    meta = {key: value for key, value in metadata.items()}
+
+    # get subset indices
+    geo_ds = read_subset(metaFile, bbox, polarization=polarization, geometry=True)
+    xybbox = geo_ds["xybbox"]
+
+    # get target grid axes + EPSG from the NISAR file
+    datasets = _datasets_for_pol(polarization)
+    with h5py.File(metaFile, "r") as ds:
+        dst_epsg = int(ds[datasets["epsg"]][()])
+        xcoord = ds[datasets["xcoord"]][xybbox[0] : xybbox[2]]
+        ycoord = ds[datasets["ycoord"]][xybbox[1] : xybbox[3]]
+
+    # warp mask raster onto NISAR grid
+    mask_src_epsg = _read_raster_epsg(maskFile)
+    mask_arr = _warp_to_grid_mem(
+        src_path=maskFile,
+        src_epsg=mask_src_epsg,
+        dst_epsg=dst_epsg,
+        xcoord=xcoord,
+        ycoord=ycoord,
+        resample_alg="near",
+    ).astype("byte")
+
+    # Convention in this script: nonzero => True (valid), 0 => False (masked)
+    water_mask_bool = mask_arr.astype(bool)
+
+    length, width = water_mask_bool.shape
+    ds_name_dict = {
+        "waterMask": [np.bool_, (length, width), water_mask_bool]
+    }
+
+    meta["FILE_TYPE"] = "waterMask"
+    meta["LENGTH"] = int(length)
+    meta["WIDTH"] = int(width)
+
+    writefile.layout_hdf5(outfile, ds_name_dict, metadata=meta)
+    return outfile
 
 
 def prepare_stack(outfile, inp_files, metadata, demFile, bbox, date12_list, polarization="HH"):
