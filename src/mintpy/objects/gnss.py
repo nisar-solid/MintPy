@@ -473,7 +473,7 @@ class GNSS:
         std_e,n,u     - 1D np.ndarray, displacement STD in meters
     """
 
-    def __init__(self, site: str, data_dir=None, version='IGS14', source='UNR', url_prefix=None):
+    def __init__(self, site: str, data_dir=None, version='IGS20', source='UNR', url_prefix=None):
         # site info
         self.site = site
         self.source = source
@@ -798,7 +798,7 @@ class GNSS_UNR(GNSS):
         explosion for interdisciplinary science. Eos, 99. doi:10.1029/2018EO104623
 
     """
-    def __init__(self, site: str, data_dir=None, version='IGS14', url_prefix=None):
+    def __init__(self, site: str, data_dir=None, version='IGS20', url_prefix=None):
         super().__init__(
             site=site,
             data_dir=data_dir,
@@ -812,14 +812,21 @@ class GNSS_UNR(GNSS):
             self.file = os.path.join(self.data_dir, f'{self.site:s}.{version:s}.tenv3')
         elif version == 'IGS14':
             self.file = os.path.join(self.data_dir, f'{self.site:s}.tenv3')
+        elif version == 'IGS20':
+            self.file = os.path.join(self.data_dir, f'{self.site:s}.tenv3')
         else:
             raise ValueError(f'Un-supported GNSS versoin: {version}!')
 
         # get url
         # examples: http://geodesy.unr.edu/gps_timeseries/tenv3/IGS08/1LSU.IGS08.tenv3
         #           http://geodesy.unr.edu/gps_timeseries/tenv3/IGS14/CASU.tenv3
+        #           https://geodesy.unr.edu/gps_timeseries/IGS20/tenv3/IGS20/AHUP.tenv3
+        
         if not self.url_prefix:
-            self.url_prefix = f'https://geodesy.unr.edu/gps_timeseries/tenv3/{self.version}'
+            if version == 'IGS20':
+                self.url_prefix = f'https://geodesy.unr.edu/gps_timeseries/{self.version}/tenv3/{self.version}'
+            else:
+                self.url_prefix = f'https://geodesy.unr.edu/gps_timeseries/tenv3/{self.version}'
         self.url = os.path.join(self.url_prefix, os.path.basename(self.file))
 
 
@@ -847,6 +854,7 @@ class GNSS_UNR(GNSS):
         url_prefix = {
             'IGS08' : 'https://geodesy.unr.edu/tsplots/IGS08/TimeSeries',
             'IGS14' : 'https://geodesy.unr.edu/tsplots/IGS14/IGS14/TimeSeries',
+            'IGS20' : 'https://geodesy.unr.edu/tsplots/IGS14/IGS14/TimeSeries',
         }[self.version]
         plot_file_url = os.path.join(url_prefix, f'{self.site}.png')
 
