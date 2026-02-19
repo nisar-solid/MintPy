@@ -13,18 +13,18 @@ from pathlib import Path
 
 import h5py
 import numpy as np
+from mintpy.constants import EARTH_RADIUS, SPEED_OF_LIGHT
+from mintpy.utils import ptime, writefile
 from osgeo import gdal
 from pyproj import Transformer
 from scipy.interpolate import RegularGridInterpolator
 
-from mintpy.constants import EARTH_RADIUS, SPEED_OF_LIGHT
-from mintpy.utils import ptime, writefile
-
-
 # ---------------------------------------------------------------------
 # Constants / HDF5 paths (GUNW frequencyA, unwrappedInterferogram)
 # ---------------------------------------------------------------------
-DATASET_ROOT_UNW = "/science/LSAR/GUNW/grids/frequencyA/unwrappedInterferogram"
+DATASET_ROOT_UNW = (
+    "/science/LSAR/GUNW/grids/frequencyA/unwrappedInterferogram"
+)
 PARAMETERS = (
     "/science/LSAR/GUNW/metadata/processingInformation/parameters/"
     "unwrappedInterferogram/frequencyA"
@@ -58,6 +58,8 @@ PROCESSINFO = {
     "rdr_slant_range": f"{RADARGRID_ROOT}/referenceSlantRange",
     "rdr_height": f"{RADARGRID_ROOT}/heightAboveEllipsoid",
     "rdr_incidence": f"{RADARGRID_ROOT}/incidenceAngle",
+    "rdr_los_x": f"{RADARGRID_ROOT}/losUnitVectorX",
+    "rdr_los_y": f"{RADARGRID_ROOT}/losUnitVectorY",
     "rdr_wet_tropo": f"{RADARGRID_ROOT}/wetTroposphericPhaseScreen",
     "rdr_hs_tropo": f"{RADARGRID_ROOT}/hydrostaticTroposphericPhaseScreen",
     "rdr_SET": f"{RADARGRID_ROOT}/slantRangeSolidEarthTidesPhase",
@@ -72,7 +74,11 @@ def _datasets_for_pol(polarization: str) -> dict:
     """Return a per-call datasets dict without mutating the global DATASETS."""
     out = {}
     for k, v in DATASETS.items():
-        out[k] = v.replace("POL", polarization) if isinstance(v, str) and "POL" in v else v
+        out[k] = (
+            v.replace("POL", polarization)
+            if isinstance(v, str) and "POL" in v
+            else v
+        )
     return out
 
 
@@ -82,7 +88,9 @@ def _grid_bounds_from_xy(xcoord: np.ndarray, ycoord: np.ndarray):
     Returns bounds in (minx, miny, maxx, maxy) and dx, dy (signed spacings).
     """
     if xcoord.size < 2 or ycoord.size < 2:
-        raise ValueError("xcoord/ycoord must have at least 2 elements to infer spacing.")
+        raise ValueError(
+            "xcoord/ycoord must have at least 2 elements to infer spacing."
+        )
 
     dx = float(xcoord[1] - xcoord[0])
     dy = float(ycoord[1] - ycoord[0])
@@ -139,7 +147,9 @@ def _read_raster_epsg(path: str) -> int:
     srs = gdal.osr.SpatialReference(wkt=ds.GetProjection())
     epsg = srs.GetAttrValue("AUTHORITY", 1)
     if epsg is None:
-        raise ValueError(f"Could not determine EPSG from raster projection: {path}")
+        raise ValueError(
+            f"Could not determine EPSG from raster projection: {path}"
+        )
     return int(epsg)
 
 
@@ -179,7 +189,7 @@ def _read_valid_unw_mask(gunw_file: str, xybbox, pol: str):
 
     valid = np.isfinite(unw)
     if fill is not None:
-        valid &= (unw != fill)
+        valid &= unw != fill
     return valid
 
 
@@ -194,13 +204,20 @@ def load_nisar(inps):
     print(f"Found {len(input_files)} unwrapped files")
 
     if inps.subset_lat:
-        bbox = (inps.subset_lon[0], inps.subset_lat[0], inps.subset_lon[1], inps.subset_lat[1])
+        bbox = (
+            inps.subset_lon[0],
+            inps.subset_lat[0],
+            inps.subset_lon[1],
+            inps.subset_lat[1],
+        )
     else:
         bbox = None
 
     # extract metadata
     pol = getattr(inps, "polarization", "HH")
-    metadata, bounds = extract_metadata(input_files, bbox=bbox, polarization=pol)
+    metadata, bounds = extract_metadata(
+        input_files, bbox=bbox, polarization=pol
+    )
 
     # output filename
     stack_file = os.path.join(inps.out_dir, "inputs/ifgramStack.h5")
@@ -301,23 +318,33 @@ def extract_metadata(input_files, bbox=None, polarization="HH"):
         xcoord = ds[datasets["xcoord"]][()]
         ycoord = ds[datasets["ycoord"]][()]
         meta["EPSG"] = int(ds[datasets["epsg"]][()])
-        meta["WAVELENGTH"] = SPEED_OF_LIGHT / ds[PROCESSINFO["centerFrequency"]][()]
-        meta["ORBIT_DIRECTION"] = ds[PROCESSINFO["orbit_direction"]][()].decode("utf-8")
+        meta["WAVELENGTH"] = (
+            SPEED_OF_LIGHT / ds[PROCESSINFO["centerFrequency"]][()]
+        )
+        meta["ORBIT_DIRECTION"] = ds[PROCESSINFO["orbit_direction"]][
+            ()
+        ].decode("utf-8")
         meta["POLARIZATION"] = polarization
         meta["ALOOKS"] = ds[datasets["azimuth_look"]][()]
         meta["RLOOKS"] = ds[datasets["range_look"]][()]
         meta["PLATFORM"] = ds[PROCESSINFO["platform"]][()].decode("utf-8")
-        meta["STARTING_RANGE"] = float(np.min(ds[PROCESSINFO["rdr_slant_range"]][()].flatten()))
+        meta["STARTING_RANGE"] = float(
+            np.min(ds[PROCESSINFO["rdr_slant_range"]][()].flatten())
+        )
 
         start_time = datetime.datetime.strptime(
-            ds[PROCESSINFO["start_time"]][()].decode("utf-8")[0:26], "%Y-%m-%dT%H:%M:%S.%f"
+            ds[PROCESSINFO["start_time"]][()].decode("utf-8")[0:26],
+            "%Y-%m-%dT%H:%M:%S.%f",
         )
         end_time = datetime.datetime.strptime(
-            ds[PROCESSINFO["end_time"]][()].decode("utf-8")[0:26], "%Y-%m-%dT%H:%M:%S.%f"
+            ds[PROCESSINFO["end_time"]][()].decode("utf-8")[0:26],
+            "%Y-%m-%dT%H:%M:%S.%f",
         )
 
     t_mid = start_time + (end_time - start_time) / 2.0
-    meta["CENTER_LINE_UTC"] = (t_mid - datetime.datetime(t_mid.year, t_mid.month, t_mid.day)).total_seconds()
+    meta["CENTER_LINE_UTC"] = (
+        t_mid - datetime.datetime(t_mid.year, t_mid.month, t_mid.day)
+    ).total_seconds()
 
     # These were previously using //2 (integer) which is wrong for float spacing.
     meta["X_FIRST"] = x_origin - float(pixel_width) / 2.0
@@ -349,7 +376,9 @@ def extract_metadata(input_files, bbox=None, polarization="HH"):
     else:
         utm_bbox = None
 
-    bounds = common_raster_bound(input_files, utm_bbox, polarization=polarization)
+    bounds = common_raster_bound(
+        input_files, utm_bbox, polarization=polarization
+    )
     meta["bbox"] = ",".join([str(b) for b in bounds])
 
     col1, row1, col2, row2 = get_rows_cols(xcoord, ycoord, bounds)
@@ -360,11 +389,62 @@ def extract_metadata(input_files, bbox=None, polarization="HH"):
 
 
 def get_rows_cols(xcoord, ycoord, bounds):
-    """Get row and cols of the bounding box to subset"""
-    xindex = np.where(np.logical_and(xcoord >= bounds[0], xcoord <= bounds[2]))[0]
-    yindex = np.where(np.logical_and(ycoord >= bounds[1], ycoord <= bounds[3]))[0]
-    row1, row2 = int(np.min(yindex)), int(np.max(yindex))
-    col1, col2 = int(np.min(xindex)), int(np.max(xindex))
+    """
+    Get (col1, row1, col2, row2) for subsetting given bounds=(xmin,ymin,xmax,ymax).
+
+    Robust to:
+      - bounds slightly outside coordinate extent
+      - collapsed/invalid overlap bounds
+      - empty index selections
+    Returns indices suitable for Python slicing: arr[row1:row2, col1:col2]
+    """
+    xcoord = np.asarray(xcoord)
+    ycoord = np.asarray(ycoord)
+
+    xmin, ymin, xmax, ymax = map(float, bounds)
+
+    # Ensure bounds ordering
+    if xmin > xmax:
+        xmin, xmax = xmax, xmin
+    if ymin > ymax:
+        ymin, ymax = ymax, ymin
+
+    # Clip bounds to coordinate extent
+    x_minc, x_maxc = float(np.nanmin(xcoord)), float(np.nanmax(xcoord))
+    y_minc, y_maxc = float(np.nanmin(ycoord)), float(np.nanmax(ycoord))
+    xmin = max(xmin, x_minc)
+    xmax = min(xmax, x_maxc)
+    ymin = max(ymin, y_minc)
+    ymax = min(ymax, y_maxc)
+
+    # If bounds collapse after clipping, fall back to full extent
+    if xmin >= xmax or ymin >= ymax:
+        xmin, xmax = x_minc, x_maxc
+        ymin, ymax = y_minc, y_maxc
+
+    # Primary selection
+    xindex = np.where((xcoord >= xmin) & (xcoord <= xmax))[0]
+    yindex = np.where((ycoord >= ymin) & (ycoord <= ymax))[0]
+
+    # If empty (can happen due to floating roundoff), fall back to nearest
+    if xindex.size == 0:
+        i1 = int(np.nanargmin(np.abs(xcoord - xmin)))
+        i2 = int(np.nanargmin(np.abs(xcoord - xmax)))
+        col1, col2 = (i1, i2) if i1 <= i2 else (i2, i1)
+    else:
+        col1, col2 = int(np.min(xindex)), int(np.max(xindex))
+
+    if yindex.size == 0:
+        j1 = int(np.nanargmin(np.abs(ycoord - ymin)))
+        j2 = int(np.nanargmin(np.abs(ycoord - ymax)))
+        row1, row2 = (j1, j2) if j1 <= j2 else (j2, j1)
+    else:
+        row1, row2 = int(np.min(yindex)), int(np.max(yindex))
+
+    # Make slice end exclusive (+1)
+    col2 = min(col2 + 1, xcoord.size)
+    row2 = min(row2 + 1, ycoord.size)
+
     return col1, row1, col2, row2
 
 
@@ -386,54 +466,102 @@ def common_raster_bound(input_files, utm_bbox=None, polarization="HH"):
     x_bounds = []
     y_bounds = []
     for file in input_files:
-        west, south, east, north = get_raster_corners(file, polarization=polarization)
+        west, south, east, north = get_raster_corners(
+            file, polarization=polarization
+        )
         x_bounds.append([west, east])
         y_bounds.append([south, north])
+    common = [max(np.min(x_bounds, axis=0)), min(np.max(x_bounds, axis=0))]
+    common.append(max(np.min(y_bounds, axis=0)))
+    common.append(min(np.max(y_bounds, axis=0)))
+    common = [common[0], common[2], common[1], common[3]]
 
-    if utm_bbox is not None:
-        x_bounds.append([utm_bbox[0], utm_bbox[2]])
-        y_bounds.append([utm_bbox[1], utm_bbox[3]])
-
-    bounds = max(x_bounds)[0], max(y_bounds)[0], min(x_bounds)[1], min(y_bounds)[1]
-    return bounds
-
-
-def bbox_to_utm(bbox, epsg_dst, epsg_src=4326):
-    """Convert bbox to epsg_dst."""
-    xmin, ymin, xmax, ymax = bbox
-    t = Transformer.from_crs(epsg_src, epsg_dst, always_xy=True)
-    xs = [xmin, xmax]
-    ys = [ymin, ymax]
-    xt, yt = t.transform(xs, ys)
-    xys = list(zip(xt, yt))
-    return (*xys[0], *xys[1])
+    if utm_bbox:
+        common = [
+            max(common[0], utm_bbox[0]),
+            max(common[1], utm_bbox[1]),
+            min(common[2], utm_bbox[2]),
+            min(common[3], utm_bbox[3]),
+        ]
+    return common
 
 
-def read_subset(inp_file, bbox, polarization="HH", geometry=False):
-    """Read a subset of data using bounding box in rows and cols"""
-    dataset = {}
+def bbox_to_utm(bbox, dst_epsg, src_epsg=4326):
+    """Convert a lat/lon bounding box to UTM (dst_epsg)."""
+    transformer = Transformer.from_crs(
+        f"EPSG:{src_epsg}", f"EPSG:{dst_epsg}", always_xy=True
+    )
+    x1, y1 = transformer.transform(bbox[0], bbox[1])
+    x2, y2 = transformer.transform(bbox[2], bbox[3])
+    xmin, xmax = (x1, x2) if x1 < x2 else (x2, x1)
+    ymin, ymax = (y1, y2) if y1 < y2 else (y2, y1)
+    return (xmin, ymin, xmax, ymax)
+
+
+def read_subset(gunw_file, bbox, polarization="HH", geometry=False):
+    """
+    Read subset for unwrapped interferogram products.
+    If geometry=True, returns bbox indices only (xybbox) without reading data arrays.
+    """
     datasets = _datasets_for_pol(polarization)
-    with h5py.File(inp_file, "r") as ds:
-        xcoord = ds[datasets["xcoord"]][:]
-        ycoord = ds[datasets["ycoord"]][:]
-        col1, row1, col2, row2 = get_rows_cols(xcoord, ycoord, bbox)
+    with h5py.File(gunw_file, "r") as ds:
+        xcoord = ds[datasets["xcoord"]][()]
+        ycoord = ds[datasets["ycoord"]][()]
+        if bbox:
+            col1, row1, col2, row2 = get_rows_cols(xcoord, ycoord, bbox)
+        else:
+            row1, row2 = 0, len(ycoord)
+            col1, col2 = 0, len(xcoord)
+
+        xybbox = (col1, row1, col2, row2)
 
         if geometry:
-            dataset["xybbox"] = (col1, row1, col2, row2)
-        else:
-            dataset["unw_data"] = ds[datasets["unw"]][row1:row2, col1:col2]
-            dataset["cor_data"] = ds[datasets["cor"]][row1:row2, col1:col2]
-            dataset["conn_comp"] = ds[datasets["connComp"]][row1:row2, col1:col2].astype(np.float32)
-            dataset["conn_comp"][dataset["conn_comp"] > 254] = np.nan
-            dataset["ion_data"] = ds[datasets["ion"]][row1:row2, col1:col2]
-            dataset["pbase"] = np.nanmean(ds[PROCESSINFO["bperp"]][()])
-    return dataset
+            return {"xybbox": xybbox}
+
+        unw_dset = ds[datasets["unw"]]
+        cor_dset = ds[datasets["cor"]]
+        cc_dset = ds[datasets["connComp"]]
+        ion_dset = ds[datasets["ion"]]
+
+        unw_data = unw_dset[row1:row2, col1:col2].astype(np.float32)
+        cor_data = cor_dset[row1:row2, col1:col2].astype(np.float32)
+        conn_comp = cc_dset[row1:row2, col1:col2].astype(np.float32)
+        ion_data = ion_dset[row1:row2, col1:col2].astype(np.float32)
+
+        # fill handling
+        fill_unw = unw_dset.attrs.get("_FillValue", None)
+        fill_cor = cor_dset.attrs.get("_FillValue", None)
+        fill_cc = cc_dset.attrs.get("_FillValue", None)
+        fill_ion = ion_dset.attrs.get("_FillValue", None)
+
+    if fill_unw is not None:
+        unw_data[unw_data == fill_unw] = np.nan
+    if fill_cor is not None:
+        cor_data[cor_data == fill_cor] = np.nan
+    if fill_cc is not None:
+        conn_comp[conn_comp == fill_cc] = np.nan
+    if fill_ion is not None:
+        ion_data[ion_data == fill_ion] = np.nan
+
+    # perpendicular baseline (kept placeholder: zeros)
+    pbase = 0.0
+
+    return {
+        "unw_data": unw_data,
+        "cor_data": cor_data,
+        "conn_comp": conn_comp,
+        "ion_data": ion_data,
+        "pbase": pbase,
+        "xybbox": xybbox,
+    }
 
 
 # ---------------------------------------------------------------------
-# Resample + interpolate (DEM + geometry + tropo + SET)
+# Geometry (DEM warp + 3D interpolation at valid pixels)
 # ---------------------------------------------------------------------
-def read_and_interpolate_geometry(gunw_file, dem_file, xybbox, polarization="HH", mask_file=None):
+def read_and_interpolate_geometry(
+    gunw_file, dem_file, xybbox, polarization="HH", mask_file=None
+):
     """
     Warp DEM to the interferogram grid (aligned), then interpolate slant range & incidence.
     Interpolation is evaluated at valid pixels only (validity from unwrappedPhase finite + _FillValue).
@@ -453,6 +581,8 @@ def read_and_interpolate_geometry(gunw_file, dem_file, xybbox, polarization="HH"
         rdr_coords["height_radar_grid"] = ds[PROCESSINFO["rdr_height"]][()]
         rdr_coords["slant_range"] = ds[PROCESSINFO["rdr_slant_range"]][()]
         rdr_coords["incidence_angle"] = ds[PROCESSINFO["rdr_incidence"]][()]
+        rdr_coords["los_x"] = ds[PROCESSINFO["rdr_los_x"]][()]
+        rdr_coords["los_y"] = ds[PROCESSINFO["rdr_los_y"]][()]
 
     # Warp DEM to exact grid
     dem_subset_array = _warp_to_grid_mem(
@@ -471,7 +601,9 @@ def read_and_interpolate_geometry(gunw_file, dem_file, xybbox, polarization="HH"
     valid = _read_valid_unw_mask(gunw_file, xybbox, polarization)
 
     # Interpolate geometry at valid pixels only
-    slant_range, incidence_angle = interpolate_geometry(X_2d, Y_2d, dem_subset_array, rdr_coords, valid)
+    slant_range, incidence_angle, azimuth_angle = interpolate_geometry(
+        X_2d, Y_2d, dem_subset_array, rdr_coords, valid
+    )
 
     # Mask handling (optional external mask warped to grid; otherwise ones)
     if mask_file in ["auto", "None", None]:
@@ -487,18 +619,25 @@ def read_and_interpolate_geometry(gunw_file, dem_file, xybbox, polarization="HH"
             resample_alg="near",
         ).astype("byte")
 
-    return dem_subset_array, slant_range, incidence_angle, mask_subset_array
+    return (
+        dem_subset_array,
+        slant_range,
+        incidence_angle,
+        azimuth_angle,
+        mask_subset_array,
+    )
 
 
 def interpolate_geometry(X_2d, Y_2d, dem, rdr_coords, valid_mask):
-    """Interpolate slant range and incidence angle at valid pixels only."""
+    """Interpolate slant range, incidence angle, and azimuth angle at valid pixels only."""
     length, width = Y_2d.shape
     out_slant = np.full((length, width), np.nan, dtype=np.float32)
     out_incid = np.full((length, width), np.nan, dtype=np.float32)
+    out_az = np.full((length, width), np.nan, dtype=np.float32)
 
     ii, jj = np.where(valid_mask)
     if ii.size == 0:
-        return out_slant, out_incid
+        return out_slant, out_incid, out_az
 
     pts = np.column_stack(
         [
@@ -516,16 +655,27 @@ def interpolate_geometry(X_2d, Y_2d, dem, rdr_coords, valid_mask):
 
     slant_itp = _make_rgi(grid, rdr_coords["slant_range"], method="linear")
     inc_itp = _make_rgi(grid, rdr_coords["incidence_angle"], method="linear")
+    losx_itp = _make_rgi(grid, rdr_coords["los_x"], method="linear")
+    losy_itp = _make_rgi(grid, rdr_coords["los_y"], method="linear")
 
     sl = slant_itp(pts)
     inc = inc_itp(pts)
+    losx = losx_itp(pts)
+    losy = losy_itp(pts)
+
+    # Azimuth angle from horizontal LOS unit vector components.
+    # Convention matches legacy ARIA-tools style: degrees(atan2(-losY, -losX)).
+    az = np.degrees(np.arctan2(-losy, -losx))
 
     out_slant[ii, jj] = sl.astype(np.float32)
     out_incid[ii, jj] = inc.astype(np.float32)
-    return out_slant, out_incid
+    out_az[ii, jj] = az.astype(np.float32)
+    return out_slant, out_incid, out_az
 
 
-def read_and_interpolate_troposphere(gunw_file, dem_file, xybbox, polarization="HH", mask_file=None):
+def read_and_interpolate_troposphere(
+    gunw_file, dem_file, xybbox, polarization="HH", mask_file=None
+):
     """Warp DEM to aligned grid and interpolate combined tropo at valid pixels only."""
     dem_src_epsg = _read_raster_epsg(dem_file)
     datasets = _datasets_for_pol(polarization)
@@ -554,7 +704,9 @@ def read_and_interpolate_troposphere(gunw_file, dem_file, xybbox, polarization="
     Y_2d, X_2d = np.meshgrid(ycoord, xcoord, indexing="ij")
     valid = _read_valid_unw_mask(gunw_file, xybbox, polarization)
 
-    total_tropo = interpolate_troposphere(X_2d, Y_2d, dem_subset_array, rdr_coords, valid)
+    total_tropo = interpolate_troposphere(
+        X_2d, Y_2d, dem_subset_array, rdr_coords, valid
+    )
     return total_tropo
 
 
@@ -587,7 +739,9 @@ def interpolate_troposphere(X_2d, Y_2d, dem, rdr_coords, valid_mask):
     return out
 
 
-def read_and_interpolate_SET(gunw_file, dem_file, xybbox, polarization="HH", mask_file=None):
+def read_and_interpolate_SET(
+    gunw_file, dem_file, xybbox, polarization="HH", mask_file=None
+):
     """Warp DEM to aligned grid and interpolate SET phase at valid pixels only."""
     dem_src_epsg = _read_raster_epsg(dem_file)
     datasets = _datasets_for_pol(polarization)
@@ -615,7 +769,9 @@ def read_and_interpolate_SET(gunw_file, dem_file, xybbox, polarization="HH", mas
     Y_2d, X_2d = np.meshgrid(ycoord, xcoord, indexing="ij")
     valid = _read_valid_unw_mask(gunw_file, xybbox, polarization)
 
-    set_phase = interpolate_set(X_2d, Y_2d, dem_subset_array, rdr_coords, valid)
+    set_phase = interpolate_set(
+        X_2d, Y_2d, dem_subset_array, rdr_coords, valid
+    )
     return set_phase
 
 
@@ -653,24 +809,33 @@ def interpolate_set(X_2d, Y_2d, dem, rdr_coords, valid_mask):
 def _get_date_pairs(filenames):
     str_list = [Path(f).stem for f in filenames]
     return [
-        str(f.split("_")[11].split("T")[0]) + "_" + str(f.split("_")[13].split("T")[0]) for f in str_list
+        str(f.split("_")[11].split("T")[0])
+        + "_"
+        + str(f.split("_")[13].split("T")[0])
+        for f in str_list
     ]
 
 
-def prepare_geometry(outfile, metaFile, metadata, bbox, demFile, maskFile, polarization="HH"):
+def prepare_geometry(
+    outfile, metaFile, metadata, bbox, demFile, maskFile, polarization="HH"
+):
     """Prepare the geometry file."""
     print("-" * 50)
     print(f"preparing geometry file: {outfile}")
 
     meta = {key: value for key, value in metadata.items()}
 
-    geo_ds = read_subset(metaFile, bbox, polarization=polarization, geometry=True)
-    dem_subset_array, slant_range, incidence_angle, mask = read_and_interpolate_geometry(
-        metaFile,
-        demFile,
-        geo_ds["xybbox"],
-        polarization=polarization,
-        mask_file=maskFile,
+    geo_ds = read_subset(
+        metaFile, bbox, polarization=polarization, geometry=True
+    )
+    dem_subset_array, slant_range, incidence_angle, azimuth_angle, mask = (
+        read_and_interpolate_geometry(
+            metaFile,
+            demFile,
+            geo_ds["xybbox"],
+            polarization=polarization,
+            mask_file=maskFile,
+        )
     )
 
     length, width = dem_subset_array.shape
@@ -678,9 +843,14 @@ def prepare_geometry(outfile, metaFile, metadata, bbox, demFile, maskFile, polar
         "height": [np.float32, (length, width), dem_subset_array],
         "incidenceAngle": [np.float32, (length, width), incidence_angle],
         "slantRangeDistance": [np.float32, (length, width), slant_range],
+        "azimuthAngle": [np.float32, (length, width), azimuth_angle],
     }
     if maskFile:
-        ds_name_dict["waterMask"] = [np.bool_, (length, width), mask.astype(bool)]
+        ds_name_dict["waterMask"] = [
+            np.bool_,
+            (length, width),
+            mask.astype(bool),
+        ]
 
     meta["FILE_TYPE"] = "geometry"
     meta["STARTING_RANGE"] = float(np.nanmin(slant_range))
@@ -696,12 +866,16 @@ def prepare_water_mask(
     print(f"preparing water mask file: {outfile}")
 
     if not maskFile or maskFile in ["auto", "None", None]:
-        raise ValueError("maskFile must be a raster path (e.g., waterMask.msk)")
+        raise ValueError(
+            "maskFile must be a raster path (e.g., waterMask.msk)"
+        )
 
     meta = {key: value for key, value in metadata.items()}
 
     # get subset indices
-    geo_ds = read_subset(metaFile, bbox, polarization=polarization, geometry=True)
+    geo_ds = read_subset(
+        metaFile, bbox, polarization=polarization, geometry=True
+    )
     xybbox = geo_ds["xybbox"]
 
     # get target grid axes + EPSG from the NISAR file
@@ -726,9 +900,7 @@ def prepare_water_mask(
     water_mask_bool = mask_arr.astype(bool)
 
     length, width = water_mask_bool.shape
-    ds_name_dict = {
-        "waterMask": [np.bool_, (length, width), water_mask_bool]
-    }
+    ds_name_dict = {"waterMask": [np.bool_, (length, width), water_mask_bool]}
 
     meta["FILE_TYPE"] = "waterMask"
     meta["LENGTH"] = int(length)
@@ -738,7 +910,15 @@ def prepare_water_mask(
     return outfile
 
 
-def prepare_stack(outfile, inp_files, metadata, demFile, bbox, date12_list, polarization="HH"):
+def prepare_stack(
+    outfile,
+    inp_files,
+    metadata,
+    demFile,
+    bbox,
+    date12_list,
+    polarization="HH",
+):
     """Prepare the input stacks."""
     print("-" * 50)
     print(f"preparing ifgramStack file: {outfile}")
@@ -750,7 +930,9 @@ def prepare_stack(outfile, inp_files, metadata, demFile, bbox, date12_list, pola
     pbase = np.zeros(num_pair, dtype=np.float32)
     cols, rows = meta["WIDTH"], meta["LENGTH"]
 
-    date12_arr = np.array([x.split("_") for x in date12_list], dtype=np.bytes_)
+    date12_arr = np.array(
+        [x.split("_") for x in date12_list], dtype=np.bytes_
+    )
     drop_ifgram = np.ones(num_pair, dtype=np.bool_)
 
     ds_name_dict = {
@@ -796,7 +978,9 @@ def prepare_stack(outfile, inp_files, metadata, demFile, bbox, date12_list, pola
             prog_bar.close()
 
     elif "inputs/tropoStack.h5" in outfile:
-        geo_ds = read_subset(inp_files[0], bbox, polarization=polarization, geometry=True)
+        geo_ds = read_subset(
+            inp_files[0], bbox, polarization=polarization, geometry=True
+        )
         total_tropo = read_and_interpolate_troposphere(
             inp_files[0], demFile, geo_ds["xybbox"], polarization=polarization
         )
@@ -808,7 +992,9 @@ def prepare_stack(outfile, inp_files, metadata, demFile, bbox, date12_list, pola
             prog_bar.close()
 
     elif "inputs/setStack.h5" in outfile:
-        geo_ds = read_subset(inp_files[0], bbox, polarization=polarization, geometry=True)
+        geo_ds = read_subset(
+            inp_files[0], bbox, polarization=polarization, geometry=True
+        )
         set_phase = read_and_interpolate_SET(
             inp_files[0], demFile, geo_ds["xybbox"], polarization=polarization
         )
