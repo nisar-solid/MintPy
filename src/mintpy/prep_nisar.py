@@ -448,17 +448,24 @@ def get_raster_corners(input_file, polarization="HH"):
 
 
 def common_raster_bound(input_files, utm_bbox=None, polarization="HH"):
-    """Get common bounds among all data"""
-    x_bounds = []
-    y_bounds = []
+    """Get common bounds among all data in (xmin, ymin, xmax, ymax)."""
+    wests = []
+    souths = []
+    easts = []
+    norths = []
     for file in input_files:
         west, south, east, north = get_raster_corners(file, polarization=polarization)
-        x_bounds.append([west, east])
-        y_bounds.append([south, north])
-    common = [max(np.min(x_bounds, axis=0)), min(np.max(x_bounds, axis=0))]
-    common.append(max(np.min(y_bounds, axis=0)))
-    common.append(min(np.max(y_bounds, axis=0)))
-    common = [common[0], common[2], common[1], common[3]]
+        wests.append(west)
+        souths.append(south)
+        easts.append(east)
+        norths.append(north)
+
+    common = [
+        max(wests),
+        max(souths),
+        min(easts),
+        min(norths),
+    ]
 
     if utm_bbox:
         common = [
@@ -467,6 +474,12 @@ def common_raster_bound(input_files, utm_bbox=None, polarization="HH"):
             min(common[2], utm_bbox[2]),
             min(common[3], utm_bbox[3]),
         ]
+
+    if common[0] >= common[2] or common[1] >= common[3]:
+        raise ValueError(
+            f"No common overlap found among input files within bounds: {common}"
+        )
+
     return common
 
 
