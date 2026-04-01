@@ -14,7 +14,7 @@ from pathlib import Path
 import h5py
 import numpy as np
 from mintpy.constants import EARTH_RADIUS, SPEED_OF_LIGHT
-from mintpy.utils import ptime, writefile
+from mintpy.utils import attribute as attr, ptime, writefile
 from osgeo import gdal
 from pyproj import Transformer
 from scipy.interpolate import RegularGridInterpolator
@@ -167,6 +167,17 @@ def _make_rgi(grid_axes, values, method="linear"):
         bounds_error=False,
         fill_value=np.nan,
     )
+
+
+def _coerce_subset_metadata_types(meta):
+    """Keep subset-updated metadata numeric for downstream array sizing."""
+    for key in ["LENGTH", "WIDTH", "XMAX", "YMAX", "SUBSET_XMIN", "SUBSET_XMAX", "SUBSET_YMIN", "SUBSET_YMAX"]:
+        if key in meta:
+            meta[key] = int(meta[key])
+    for key in ["X_FIRST", "Y_FIRST", "X_STEP", "Y_STEP"]:
+        if key in meta:
+            meta[key] = float(meta[key])
+    return meta
 
 
 def _read_valid_unw_mask(gunw_file: str, xybbox, pol: str):
@@ -369,6 +380,10 @@ def extract_metadata(input_files, bbox=None, polarization="HH"):
     meta["RANGE_PIXEL_SIZE"] = abs(float(pixel_width))
     meta["AZIMUTH_PIXEL_SIZE"] = abs(float(pixel_height))
 
+    # keep full-scene dimensions/origin first, then apply subset offsets below
+    meta["LENGTH"] = int(ycoord.size)
+    meta["WIDTH"] = int(xcoord.size)
+
     # bbox handling
     if bbox:
         epsg_src = 4326
@@ -380,8 +395,8 @@ def extract_metadata(input_files, bbox=None, polarization="HH"):
     meta["bbox"] = ",".join([str(b) for b in bounds])
 
     col1, row1, col2, row2 = get_rows_cols(xcoord, ycoord, bounds)
-    meta["LENGTH"] = int(row2 - row1)
-    meta["WIDTH"] = int(col2 - col1)
+    meta = attr.update_attribute4subset(meta, (col1, row1, col2, row2), print_msg=False)
+    meta = _coerce_subset_metadata_types(meta)
 
     return meta, bounds
 
@@ -496,15 +511,23 @@ def common_raster_bound(input_files, utm_bbox=None, polarization="HH"):
 
 
 def bbox_to_utm(bbox, dst_epsg, src_epsg=4326):
-    """Convert a lat/lon bounding box to UTM (dst_epsg)."""
+    """Convert a bounding box into the destination CRS.
+
+    Use transform_bounds instead of projecting only two diagonal corners.
+    For projected grids such as UTM, a lat/lon-aligned box is not guaranteed
+    to remain axis-aligned after reprojection, so the diagonal-corner approach
+    can clip valid data near the other two corners.
+    """
+    xmin, xmax = sorted((float(bbox[0]), float(bbox[2])))
+    ymin, ymax = sorted((float(bbox[1]), float(bbox[3])))
+
+    if int(dst_epsg) == int(src_epsg):
+        return (xmin, ymin, xmax, ymax)
+
     transformer = Transformer.from_crs(
         f"EPSG:{src_epsg}", f"EPSG:{dst_epsg}", always_xy=True
     )
-    x1, y1 = transformer.transform(bbox[0], bbox[1])
-    x2, y2 = transformer.transform(bbox[2], bbox[3])
-    xmin, xmax = (x1, x2) if x1 < x2 else (x2, x1)
-    ymin, ymax = (y1, y2) if y1 < y2 else (y2, y1)
-    return (xmin, ymin, xmax, ymax)
+    return transformer.transform_bounds(xmin, ymin, xmax, ymax, densify_pts=21)
 
 
 def read_subset(gunw_file, bbox, polarization="HH", geometry=False):
@@ -929,7 +952,8 @@ def prepare_stack(
     print(f"number of inputs/unwrapped interferograms: {num_pair}")
 
     pbase = np.zeros(num_pair, dtype=np.float32)
-    cols, rows = meta["WIDTH"], meta["LENGTH"]
+    cols = int(meta["WIDTH"])
+    rows = int(meta["LENGTH"])
 
     date12_arr = np.array([x.split("_") for x in date12_list], dtype=np.bytes_)
     drop_ifgram = np.ones(num_pair, dtype=np.bool_)
