@@ -195,6 +195,18 @@ def load_nisar(inps):
     print(f"update mode: {inps.update_mode}")
 
     input_files = sorted(glob.glob(inps.input_glob))
+    if not input_files:
+        raise FileNotFoundError(
+            f"No NISAR GUNW files found for input pattern: {inps.input_glob}"
+        )
+
+    if str(inps.dem_file).lower() in ["auto", "none", "no", ""]:
+        raise ValueError(
+            f"A real DEM path is required for prep_nisar.py; got {inps.dem_file!r}"
+        )
+    if not os.path.isfile(inps.dem_file):
+        raise FileNotFoundError(f"DEM file not found: {inps.dem_file}")
+
     print(f"Found {len(input_files)} unwrapped files")
 
     if inps.subset_lat:
