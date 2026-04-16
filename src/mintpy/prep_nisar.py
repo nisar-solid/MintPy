@@ -3,7 +3,7 @@
 # Program is part of MintPy                                #
 # Copyright (c) 2013, Zhang Yunjun, Heresh Fattahi         #
 # Author: Sara Mirzaee, Jul 2023                           #
-#         Emre Havazli, Feb 2026                           #
+#         Emre Havazli, Apr 2026                           #
 ############################################################
 
 import datetime
@@ -13,40 +13,26 @@ from pathlib import Path
 
 import h5py
 import numpy as np
-from mintpy.constants import EARTH_RADIUS, SPEED_OF_LIGHT
-from mintpy.utils import attribute as attr, ptime, writefile
-from osgeo import gdal
+from osgeo import gdal, osr
 from pyproj import Transformer
 from scipy.interpolate import RegularGridInterpolator
 
+from mintpy.constants import EARTH_RADIUS, SPEED_OF_LIGHT
+from mintpy.utils import attribute as attr, ptime, writefile
+
 # ---------------------------------------------------------------------
-# Constants / HDF5 paths (GUNW frequencyA, unwrappedInterferogram)
+# Constants / HDF5 paths
 # ---------------------------------------------------------------------
-DATASET_ROOT_UNW = "/science/LSAR/GUNW/grids/frequencyA/unwrappedInterferogram"
-PARAMETERS = (
-    "/science/LSAR/GUNW/metadata/processingInformation/parameters/"
-    "unwrappedInterferogram/frequencyA"
-)
+FREQUENCY_MAP = {
+    "A": "frequencyA",
+    "B": "frequencyB",
+    "frequencyA": "frequencyA",
+    "frequencyB": "frequencyB",
+}
 IDENTIFICATION = "/science/LSAR/identification"
 RADARGRID_ROOT = "science/LSAR/GUNW/metadata/radarGrid"
 
-DATASETS = {
-    "xcoord": f"{DATASET_ROOT_UNW}/POL/xCoordinates",
-    "ycoord": f"{DATASET_ROOT_UNW}/POL/yCoordinates",
-    "unw": f"{DATASET_ROOT_UNW}/POL/unwrappedPhase",
-    "cor": f"{DATASET_ROOT_UNW}/POL/coherenceMagnitude",
-    "connComp": f"{DATASET_ROOT_UNW}/POL/connectedComponents",
-    "ion": f"{DATASET_ROOT_UNW}/POL/ionospherePhaseScreen",
-    "epsg": f"{DATASET_ROOT_UNW}/POL/projection",
-    "xSpacing": f"{DATASET_ROOT_UNW}/POL/xCoordinateSpacing",
-    "ySpacing": f"{DATASET_ROOT_UNW}/POL/yCoordinateSpacing",
-    "polarization": "/science/LSAR/GUNW/grids/frequencyA/listOfPolarizations",
-    "range_look": f"{PARAMETERS}/numberOfRangeLooks",
-    "azimuth_look": f"{PARAMETERS}/numberOfAzimuthLooks",
-}
-
 PROCESSINFO = {
-    "centerFrequency": "/science/LSAR/GUNW/grids/frequencyA/centerFrequency",
     "orbit_direction": f"{IDENTIFICATION}/orbitPassDirection",
     "platform": f"{IDENTIFICATION}/missionId",
     "start_time": f"{IDENTIFICATION}/referenceZeroDopplerStartTime",
@@ -64,25 +50,93 @@ PROCESSINFO = {
     "bperp": f"{RADARGRID_ROOT}/perpendicularBaseline",
 }
 
+STACK_TYPES = {"ifgram", "ion", "tropo", "set"}
+
 
 # ---------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------
-def _datasets_for_pol(polarization: str) -> dict:
-    """Return a per-call datasets dict without mutating the global DATASETS."""
-    out = {}
-    for k, v in DATASETS.items():
-        out[k] = (
-            v.replace("POL", polarization) if isinstance(v, str) and "POL" in v else v
+def _normalize_frequency(frequency) -> str:
+    """Return the GUNW frequency group name for CLI values auto/A/B."""
+    if frequency is None or str(frequency).lower() == "auto":
+        return "frequencyA"
+
+    normalized = FREQUENCY_MAP.get(str(frequency))
+    if normalized is None:
+        raise ValueError("frequency must be one of: auto, A, B")
+    return normalized
+
+
+def _dataset_root_unw(frequency: str) -> str:
+    return f"/science/LSAR/GUNW/grids/{frequency}/unwrappedInterferogram"
+
+
+def _parameters_root(frequency: str) -> str:
+    return (
+        "/science/LSAR/GUNW/metadata/processingInformation/parameters/"
+        f"unwrappedInterferogram/{frequency}"
+    )
+
+
+def _center_frequency_path(frequency: str) -> str:
+    return f"/science/LSAR/GUNW/grids/{frequency}/centerFrequency"
+
+
+def _datasets_for_pol(polarization: str, frequency: str) -> dict:
+    """Return per-call dataset paths for the selected frequency/polarization."""
+    root = _dataset_root_unw(frequency)
+    parameters = _parameters_root(frequency)
+    return {
+        "xcoord": f"{root}/{polarization}/xCoordinates",
+        "ycoord": f"{root}/{polarization}/yCoordinates",
+        "unw": f"{root}/{polarization}/unwrappedPhase",
+        "mask": f"{root}/mask",
+        "cor": f"{root}/{polarization}/coherenceMagnitude",
+        "connComp": f"{root}/{polarization}/connectedComponents",
+        "ion": f"{root}/{polarization}/ionospherePhaseScreen",
+        "epsg": f"{root}/{polarization}/projection",
+        "xSpacing": f"{root}/{polarization}/xCoordinateSpacing",
+        "ySpacing": f"{root}/{polarization}/yCoordinateSpacing",
+        "polarization": f"/science/LSAR/GUNW/grids/{frequency}/listOfPolarizations",
+        "range_look": f"{parameters}/numberOfRangeLooks",
+        "azimuth_look": f"{parameters}/numberOfAzimuthLooks",
+    }
+
+
+def _resolve_frequency(gunw_file: str, frequency, polarization: str) -> str:
+    """Resolve and validate the requested NISAR frequency."""
+    resolved = _normalize_frequency(frequency)
+    datasets = _datasets_for_pol(polarization, resolved)
+
+    with h5py.File(gunw_file, "r") as ds:
+        required_paths = [
+            _dataset_root_unw(resolved),
+            datasets["unw"],
+            _center_frequency_path(resolved),
+        ]
+        missing = [path for path in required_paths if path not in ds]
+
+    if missing:
+        requested_frequency = "auto" if frequency is None else str(frequency)
+        requested = (
+            "auto (frequencyA)"
+            if requested_frequency.lower() == "auto"
+            else requested_frequency
         )
-    return out
+        if requested_frequency in ["auto", "A", "frequencyA"]:
+            hint = "Use --frequency B for frequencyB products."
+        else:
+            hint = "Check that the input file contains frequencyB for this polarization."
+        raise ValueError(
+            f"NISAR {requested} data for polarization {polarization!r} was not found "
+            f"in {gunw_file}. Missing path: {missing[0]}. {hint}"
+        )
+
+    return resolved
 
 
 def _grid_bounds_from_xy(xcoord: np.ndarray, ycoord: np.ndarray):
-    """
-    Compute pixel-edge bounds aligned to the xcoord/ycoord grid (pixel centers).
-    Returns bounds in (minx, miny, maxx, maxy) and dx, dy (signed spacings).
-    """
+    """Return pixel-edge bounds and signed spacing for x/y pixel centers."""
     if xcoord.size < 2 or ycoord.size < 2:
         raise ValueError(
             "xcoord/ycoord must have at least 2 elements to infer spacing."
@@ -111,20 +165,16 @@ def _warp_to_grid_mem(
     ycoord: np.ndarray,
     resample_alg: str,
 ):
-    """
-    Warp a raster to the exact xcoord/ycoord grid using MEM output.
-    Uses bounds derived from pixel-edge and xRes/yRes with targetAlignedPixels.
-    """
-    bounds, dx, dy = _grid_bounds_from_xy(xcoord, ycoord)
+    """Warp a raster to the exact xcoord/ycoord grid using MEM output."""
+    bounds, _, _ = _grid_bounds_from_xy(xcoord, ycoord)
 
     warp_opts = gdal.WarpOptions(
         format="MEM",
         outputBounds=bounds,
         srcSRS=f"EPSG:{src_epsg}",
         dstSRS=f"EPSG:{dst_epsg}",
-        xRes=abs(dx),
-        yRes=abs(dy),
-        targetAlignedPixels=True,
+        width=int(xcoord.size),
+        height=int(ycoord.size),
         resampleAlg=resample_alg,
     )
     dst = gdal.Warp("", src_path, options=warp_opts)
@@ -140,19 +190,34 @@ def _read_raster_epsg(path: str) -> int:
     ds = gdal.Open(path, gdal.GA_ReadOnly)
     if ds is None:
         raise OSError(f"Cannot open raster: {path}")
-    srs = gdal.osr.SpatialReference(wkt=ds.GetProjection())
-    epsg = srs.GetAttrValue("AUTHORITY", 1)
+    projection = ds.GetProjection()
+    if not projection:
+        raise ValueError(f"Raster has no projection metadata: {path}")
+
+    srs = osr.SpatialReference()
+    if srs.ImportFromWkt(projection) != 0:
+        raise ValueError(
+            f"Could not parse raster projection WKT for {path}: {projection!r}"
+        )
+
+    srs.AutoIdentifyEPSG()
+    epsg = srs.GetAuthorityCode(None)
     if epsg is None:
-        raise ValueError(f"Could not determine EPSG from raster projection: {path}")
+        for authority_node in ["PROJCS", "GEOGCS"]:
+            epsg = srs.GetAuthorityCode(authority_node)
+            if epsg is not None:
+                break
+
+    if epsg is None:
+        raise ValueError(
+            f"Could not determine EPSG from raster projection for {path}: {projection!r}"
+        )
+
     return int(epsg)
 
 
 def _make_rgi(grid_axes, values, method="linear"):
-    """
-    RegularGridInterpolator wrapper:
-      - flips decreasing axes (SciPy requires increasing)
-      - bounds_error=False + fill_value=np.nan to avoid crashing
-    """
+    """Wrap scipy interpolation with axis-order and out-of-bounds handling."""
     axes = [np.asarray(a) for a in grid_axes]
     vals = values
     for dim, ax in enumerate(axes):
@@ -171,7 +236,16 @@ def _make_rgi(grid_axes, values, method="linear"):
 
 def _coerce_subset_metadata_types(meta):
     """Keep subset-updated metadata numeric for downstream array sizing."""
-    for key in ["LENGTH", "WIDTH", "XMAX", "YMAX", "SUBSET_XMIN", "SUBSET_XMAX", "SUBSET_YMIN", "SUBSET_YMAX"]:
+    for key in [
+        "LENGTH",
+        "WIDTH",
+        "XMAX",
+        "YMAX",
+        "SUBSET_XMIN",
+        "SUBSET_XMAX",
+        "SUBSET_YMIN",
+        "SUBSET_YMAX",
+    ]:
         if key in meta:
             meta[key] = int(meta[key])
     for key in ["X_FIRST", "Y_FIRST", "X_STEP", "Y_STEP"]:
@@ -180,13 +254,10 @@ def _coerce_subset_metadata_types(meta):
     return meta
 
 
-def _read_valid_unw_mask(gunw_file: str, xybbox, pol: str):
-    """
-    Validity mask is ALWAYS based on finite unwrappedPhase (+ _FillValue check),
-    using:
-      /science/LSAR/GUNW/grids/frequencyA/unwrappedInterferogram/{pol}/unwrappedPhase
-    """
-    path = f"{DATASET_ROOT_UNW}/{pol}/unwrappedPhase"
+def _read_unwrapped_phase_valid_mask(gunw_file: str, xybbox, pol: str, frequency: str):
+    """Fallback validity mask based on finite unwrappedPhase (+ _FillValue check)."""
+    datasets = _datasets_for_pol(pol, frequency)
+    path = datasets["unw"]
     with h5py.File(gunw_file, "r") as ds:
         dset = ds[path]
         unw = dset[xybbox[1] : xybbox[3], xybbox[0] : xybbox[2]]
@@ -196,6 +267,234 @@ def _read_valid_unw_mask(gunw_file: str, xybbox, pol: str):
     if fill is not None:
         valid &= unw != fill
     return valid
+
+
+def _read_is_land_and_valid_mask(gunw_file: str, xybbox, pol: str, frequency: str):
+    """Decode the native GUNW mask into MintPy's keep-mask convention."""
+    datasets = _datasets_for_pol(pol, frequency)
+    path = datasets["mask"]
+
+    with h5py.File(gunw_file, "r") as ds:
+        if path not in ds:
+            return _read_unwrapped_phase_valid_mask(gunw_file, xybbox, pol, frequency)
+
+        dset = ds[path]
+        mask = dset[xybbox[1] : xybbox[3], xybbox[0] : xybbox[2]]
+        fill = dset.attrs.get("_FillValue", None)
+
+    valid_samples = np.isfinite(mask)
+    if fill is not None:
+        valid_samples &= mask != fill
+
+    mask = np.where(valid_samples, mask, 0).astype(np.int64, copy=False)
+    water_mask = (mask // 100) == 1
+    ref_subswath = (mask // 10) % 10
+    sec_subswath = mask % 10
+    is_valid = valid_samples & (ref_subswath > 0) & (sec_subswath > 0)
+    return is_valid & ~water_mask
+
+
+def _read_perpendicular_baseline(gunw_file: str) -> np.float32:
+    """Read the NISAR perpendicular baseline as one finite mean value."""
+    with h5py.File(gunw_file, "r") as ds:
+        dset = ds[PROCESSINFO["bperp"]]
+        bperp = np.asarray(dset[()], dtype=np.float64).reshape(-1)
+        fill = dset.attrs.get("_FillValue", None)
+
+    if fill is not None:
+        bperp = np.where(bperp == fill, np.nan, bperp)
+
+    bperp = bperp[np.isfinite(bperp)]
+    if bperp.size == 0:
+        raise ValueError(
+            f"No finite perpendicular baseline values found in {gunw_file}"
+        )
+
+    pbase = np.mean(bperp)
+    return np.float32(pbase)
+
+
+def _read_target_grid(gunw_file: str, xybbox, polarization: str, frequency: str):
+    """Read the destination EPSG and subset grid axes from a GUNW file."""
+    datasets = _datasets_for_pol(polarization, frequency)
+    with h5py.File(gunw_file, "r") as ds:
+        return (
+            int(ds[datasets["epsg"]][()]),
+            ds[datasets["xcoord"]][xybbox[0] : xybbox[2]],
+            ds[datasets["ycoord"]][xybbox[1] : xybbox[3]],
+        )
+
+
+def _read_radar_grid_fields(gunw_file: str, field_map: dict):
+    """Read radar-grid interpolation axes plus the requested data fields."""
+    rdr_coords = {}
+    with h5py.File(gunw_file, "r") as ds:
+        rdr_coords["xcoord_radar_grid"] = ds[PROCESSINFO["rdr_xcoord"]][()]
+        rdr_coords["ycoord_radar_grid"] = ds[PROCESSINFO["rdr_ycoord"]][()]
+        rdr_coords["height_radar_grid"] = ds[PROCESSINFO["rdr_height"]][()]
+        for out_key, process_key in field_map.items():
+            rdr_coords[out_key] = ds[PROCESSINFO[process_key]][()]
+    return rdr_coords
+
+
+def _prepare_radar_grid_interpolation(
+    gunw_file, dem_file, xybbox, polarization, frequency, field_map
+):
+    """Build the common DEM/grid/valid-mask context for radar-grid interpolation."""
+    dem_src_epsg = _read_raster_epsg(dem_file)
+    dst_epsg, xcoord, ycoord = _read_target_grid(
+        gunw_file, xybbox, polarization, frequency
+    )
+    rdr_coords = _read_radar_grid_fields(gunw_file, field_map)
+
+    dem_subset_array = _warp_to_grid_mem(
+        src_path=dem_file,
+        src_epsg=dem_src_epsg,
+        dst_epsg=dst_epsg,
+        xcoord=xcoord,
+        ycoord=ycoord,
+        resample_alg="bilinear",
+    )
+
+    y_2d, x_2d = np.meshgrid(ycoord, xcoord, indexing="ij")
+    valid_mask = _read_is_land_and_valid_mask(
+        gunw_file, xybbox, polarization, frequency
+    )
+
+    return {
+        "dst_epsg": dst_epsg,
+        "xcoord": xcoord,
+        "ycoord": ycoord,
+        "x_2d": x_2d,
+        "y_2d": y_2d,
+        "dem": dem_subset_array,
+        "valid_mask": valid_mask,
+        "rdr_coords": rdr_coords,
+    }
+
+
+def _prepare_valid_interp_points(x_2d, y_2d, dem, valid_mask):
+    """Return output shape plus 3D interpolation points for valid pixels only."""
+    shape = y_2d.shape
+    ii, jj = np.where(valid_mask)
+    if ii.size == 0:
+        return shape, ii, jj, None
+
+    pts = np.column_stack(
+        [
+            dem[ii, jj].astype(np.float64),
+            y_2d[ii, jj].astype(np.float64),
+            x_2d[ii, jj].astype(np.float64),
+        ]
+    )
+    return shape, ii, jj, pts
+
+
+def _interpolate_radar_grid_field(rdr_coords, field_name, pts):
+    """Interpolate one radar-grid field at valid pixel locations."""
+    grid = (
+        rdr_coords["height_radar_grid"],
+        rdr_coords["ycoord_radar_grid"],
+        rdr_coords["xcoord_radar_grid"],
+    )
+    interpolator = _make_rgi(grid, rdr_coords[field_name], method="linear")
+    return interpolator(pts)
+
+
+def _empty_interp_array(shape):
+    """Allocate a float32 array initialized with NaNs for interpolation output."""
+    return np.full(shape, np.nan, dtype=np.float32)
+
+
+def _resolve_stack_type(stack_type, outfile):
+    """Prefer explicit stack types while keeping legacy filename inference."""
+    if stack_type is not None:
+        if stack_type not in STACK_TYPES:
+            raise ValueError(
+                f"Unsupported stack_type {stack_type!r}; expected one of {sorted(STACK_TYPES)}"
+            )
+        return stack_type
+
+    legacy_names = {
+        "inputs/ifgramStack.h5": "ifgram",
+        "inputs/ionStack.h5": "ion",
+        "inputs/tropoStack.h5": "tropo",
+        "inputs/setStack.h5": "set",
+    }
+    for legacy_name, inferred_type in legacy_names.items():
+        if legacy_name in outfile:
+            return inferred_type
+
+    raise ValueError(
+        f"Unable to infer stack_type from outfile {outfile!r}. "
+        "Please pass stack_type explicitly."
+    )
+
+
+def _required_paths_for_stack_type(stack_type, polarization, frequency):
+    """Return HDF5 source datasets needed to build the requested stack."""
+    datasets = _datasets_for_pol(polarization, frequency)
+    if stack_type == "ifgram":
+        return [datasets["unw"], datasets["cor"], datasets["connComp"]]
+    if stack_type == "ion":
+        return [datasets["ion"], datasets["cor"], datasets["connComp"]]
+    if stack_type == "tropo":
+        return [PROCESSINFO["rdr_wet_tropo"], PROCESSINFO["rdr_hs_tropo"]]
+    if stack_type == "set":
+        return [PROCESSINFO["rdr_SET"]]
+
+    raise ValueError(
+        f"Unsupported stack_type {stack_type!r}; expected one of {sorted(STACK_TYPES)}"
+    )
+
+
+def _missing_required_paths(inp_files, stack_type, polarization, frequency):
+    """Return missing required HDF5 source paths as (file, path) pairs."""
+    required_paths = _required_paths_for_stack_type(stack_type, polarization, frequency)
+    missing = []
+
+    for file in inp_files:
+        with h5py.File(file, "r") as ds:
+            missing.extend((file, path) for path in required_paths if path not in ds)
+
+    return missing
+
+
+def _read_stack_observation(file, stack_type, bbox, dem_file, polarization, frequency):
+    """Read one observation for the requested stack type."""
+    pbase = _read_perpendicular_baseline(file)
+
+    if stack_type in {"ifgram", "ion"}:
+        dataset = read_subset(file, bbox, polarization=polarization, frequency=frequency)
+        unwrap_key = "unw_data" if stack_type == "ifgram" else "ion_data"
+        return {
+            "unwrap_phase": dataset[unwrap_key],
+            "coherence": dataset["cor_data"],
+            "connect_component": dataset["conn_comp"],
+            "pbase": pbase,
+        }
+
+    geo_ds = read_subset(
+        file, bbox, polarization=polarization, frequency=frequency, geometry=True
+    )
+    if stack_type == "tropo":
+        unwrap_phase = read_and_interpolate_troposphere(
+            file,
+            dem_file,
+            geo_ds["xybbox"],
+            polarization=polarization,
+            frequency=frequency,
+        )
+    else:
+        unwrap_phase = read_and_interpolate_SET(
+            file,
+            dem_file,
+            geo_ds["xybbox"],
+            polarization=polarization,
+            frequency=frequency,
+        )
+
+    return {"unwrap_phase": unwrap_phase, "pbase": pbase}
 
 
 # ---------------------------------------------------------------------
@@ -232,7 +531,11 @@ def load_nisar(inps):
 
     # extract metadata
     pol = getattr(inps, "polarization", "HH")
-    metadata, bounds = extract_metadata(input_files, bbox=bbox, polarization=pol)
+    frequency = _resolve_frequency(input_files[0], getattr(inps, "frequency", "auto"), pol)
+    print(f"Using NISAR {frequency}")
+    metadata, bounds = extract_metadata(
+        input_files, bbox=bbox, polarization=pol, frequency=frequency
+    )
 
     # output filename
     stack_file = os.path.join(inps.out_dir, "inputs/ifgramStack.h5")
@@ -251,21 +554,22 @@ def load_nisar(inps):
         bbox=bounds,
         metadata=metadata,
         demFile=inps.dem_file,
-        maskFile=inps.mask_file,
+        externalMaskFile=inps.mask_file,
         polarization=pol,
+        frequency=frequency,
     )
 
     # standalone water mask (MintPy format)
-    if getattr(inps, "mask_file", None) not in [None, "None", "auto"]:
-        water_mask_file = os.path.join(inps.out_dir, "waterMask.h5")
-        prepare_water_mask(
-            outfile=water_mask_file,
-            metaFile=input_files[0],
-            metadata=metadata,
-            bbox=bounds,
-            maskFile=inps.mask_file,
-            polarization=pol,
-        )
+    water_mask_file = os.path.join(inps.out_dir, "waterMask.h5")
+    prepare_water_mask(
+        outfile=water_mask_file,
+        metaFile=input_files[0],
+        metadata=metadata,
+        bbox=bounds,
+        externalMaskFile=inps.mask_file,
+        polarization=pol,
+        frequency=frequency,
+    )
 
     # ifgram stack
     prepare_stack(
@@ -276,6 +580,8 @@ def load_nisar(inps):
         bbox=bounds,
         date12_list=date12_list,
         polarization=pol,
+        frequency=frequency,
+        stack_type="ifgram",
     )
 
     # ionosphere stack
@@ -287,6 +593,8 @@ def load_nisar(inps):
         bbox=bounds,
         date12_list=date12_list,
         polarization=pol,
+        frequency=frequency,
+        stack_type="ion",
     )
 
     # troposphere stack
@@ -298,8 +606,9 @@ def load_nisar(inps):
         bbox=bounds,
         date12_list=date12_list,
         polarization=pol,
+        frequency=frequency,
+        stack_type="tropo",
     )
-    print("Done.")
 
     # SET stack
     prepare_stack(
@@ -310,6 +619,8 @@ def load_nisar(inps):
         bbox=bounds,
         date12_list=date12_list,
         polarization=pol,
+        frequency=frequency,
+        stack_type="set",
     )
     print("Done.")
     return
@@ -318,12 +629,12 @@ def load_nisar(inps):
 # ---------------------------------------------------------------------
 # Metadata / subset utilities
 # ---------------------------------------------------------------------
-def extract_metadata(input_files, bbox=None, polarization="HH"):
+def extract_metadata(input_files, bbox=None, polarization="HH", frequency="frequencyA"):
     """Extract NISAR metadata for MintPy."""
     meta_file = input_files[0]
     meta = {}
 
-    datasets = _datasets_for_pol(polarization)
+    datasets = _datasets_for_pol(polarization, frequency)
 
     with h5py.File(meta_file, "r") as ds:
         pixel_height = ds[datasets["ySpacing"]][()]
@@ -333,7 +644,7 @@ def extract_metadata(input_files, bbox=None, polarization="HH"):
         xcoord = ds[datasets["xcoord"]][()]
         ycoord = ds[datasets["ycoord"]][()]
         meta["EPSG"] = int(ds[datasets["epsg"]][()])
-        meta["WAVELENGTH"] = SPEED_OF_LIGHT / ds[PROCESSINFO["centerFrequency"]][()]
+        meta["WAVELENGTH"] = SPEED_OF_LIGHT / ds[_center_frequency_path(frequency)][()]
         meta["ORBIT_DIRECTION"] = ds[PROCESSINFO["orbit_direction"]][()].decode("utf-8")
         meta["POLARIZATION"] = polarization
         meta["ALOOKS"] = ds[datasets["azimuth_look"]][()]
@@ -391,7 +702,9 @@ def extract_metadata(input_files, bbox=None, polarization="HH"):
     else:
         utm_bbox = None
 
-    bounds = common_raster_bound(input_files, utm_bbox, polarization=polarization)
+    bounds = common_raster_bound(
+        input_files, utm_bbox, polarization=polarization, frequency=frequency
+    )
     meta["bbox"] = ",".join([str(b) for b in bounds])
 
     col1, row1, col2, row2 = get_rows_cols(xcoord, ycoord, bounds)
@@ -402,15 +715,7 @@ def extract_metadata(input_files, bbox=None, polarization="HH"):
 
 
 def get_rows_cols(xcoord, ycoord, bounds):
-    """
-    Get (col1, row1, col2, row2) for subsetting given bounds=(xmin,ymin,xmax,ymax).
-
-    Robust to:
-      - bounds slightly outside coordinate extent
-      - collapsed/invalid overlap bounds
-      - empty index selections
-    Returns indices suitable for Python slicing: arr[row1:row2, col1:col2]
-    """
+    """Get subset indices for bounds=(xmin, ymin, xmax, ymax)."""
     xcoord = np.asarray(xcoord)
     ycoord = np.asarray(ycoord)
 
@@ -461,9 +766,9 @@ def get_rows_cols(xcoord, ycoord, bounds):
     return col1, row1, col2, row2
 
 
-def get_raster_corners(input_file, polarization="HH"):
+def get_raster_corners(input_file, polarization="HH", frequency="frequencyA"):
     """Get the (west, south, east, north) bounds of the image."""
-    datasets = _datasets_for_pol(polarization)
+    datasets = _datasets_for_pol(polarization, frequency)
     with h5py.File(input_file, "r") as ds:
         xcoord = ds[datasets["xcoord"]][:]
         ycoord = ds[datasets["ycoord"]][:]
@@ -474,14 +779,18 @@ def get_raster_corners(input_file, polarization="HH"):
     return float(west), float(south), float(east), float(north)
 
 
-def common_raster_bound(input_files, utm_bbox=None, polarization="HH"):
+def common_raster_bound(
+    input_files, utm_bbox=None, polarization="HH", frequency="frequencyA"
+):
     """Get common bounds among all data in (xmin, ymin, xmax, ymax)."""
     wests = []
     souths = []
     easts = []
     norths = []
     for file in input_files:
-        west, south, east, north = get_raster_corners(file, polarization=polarization)
+        west, south, east, north = get_raster_corners(
+            file, polarization=polarization, frequency=frequency
+        )
         wests.append(west)
         souths.append(south)
         easts.append(east)
@@ -511,13 +820,9 @@ def common_raster_bound(input_files, utm_bbox=None, polarization="HH"):
 
 
 def bbox_to_utm(bbox, dst_epsg, src_epsg=4326):
-    """Convert a bounding box into the destination CRS.
-
-    Use transform_bounds instead of projecting only two diagonal corners.
-    For projected grids such as UTM, a lat/lon-aligned box is not guaranteed
-    to remain axis-aligned after reprojection, so the diagonal-corner approach
-    can clip valid data near the other two corners.
-    """
+    """Convert a bounding box into the destination CRS."""
+    # Use transform_bounds instead of projecting only two diagonal corners.
+    # Projected lat/lon-aligned boxes are not guaranteed to remain axis-aligned.
     xmin, xmax = sorted((float(bbox[0]), float(bbox[2])))
     ymin, ymax = sorted((float(bbox[1]), float(bbox[3])))
 
@@ -530,12 +835,9 @@ def bbox_to_utm(bbox, dst_epsg, src_epsg=4326):
     return transformer.transform_bounds(xmin, ymin, xmax, ymax, densify_pts=21)
 
 
-def read_subset(gunw_file, bbox, polarization="HH", geometry=False):
-    """
-    Read subset for unwrapped interferogram products.
-    If geometry=True, returns bbox indices only (xybbox) without reading data arrays.
-    """
-    datasets = _datasets_for_pol(polarization)
+def read_subset(gunw_file, bbox, polarization="HH", frequency="frequencyA", geometry=False):
+    """Read subset arrays or only geometry bounds for unwrapped products."""
+    datasets = _datasets_for_pol(polarization, frequency)
     with h5py.File(gunw_file, "r") as ds:
         xcoord = ds[datasets["xcoord"]][()]
         ycoord = ds[datasets["ycoord"]][()]
@@ -575,15 +877,11 @@ def read_subset(gunw_file, bbox, polarization="HH", geometry=False):
     if fill_ion is not None:
         ion_data[ion_data == fill_ion] = np.nan
 
-    # perpendicular baseline (kept placeholder: zeros)
-    pbase = 0.0
-
     return {
         "unw_data": unw_data,
         "cor_data": cor_data,
         "conn_comp": conn_comp,
         "ion_data": ion_data,
-        "pbase": pbase,
         "xybbox": xybbox,
     }
 
@@ -592,67 +890,51 @@ def read_subset(gunw_file, bbox, polarization="HH", geometry=False):
 # Geometry (DEM warp + 3D interpolation at valid pixels)
 # ---------------------------------------------------------------------
 def read_and_interpolate_geometry(
-    gunw_file, dem_file, xybbox, polarization="HH", mask_file=None
+    gunw_file,
+    dem_file,
+    xybbox,
+    polarization="HH",
+    frequency="frequencyA",
+    external_mask_file=None,
 ):
-    """
-    Warp DEM to the interferogram grid (aligned), then interpolate slant range & incidence.
-    Interpolation is evaluated at valid pixels only (validity from unwrappedPhase finite + _FillValue).
-    """
-    dem_src_epsg = _read_raster_epsg(dem_file)
-
-    datasets = _datasets_for_pol(polarization)
-    rdr_coords = {}
-
-    with h5py.File(gunw_file, "r") as ds:
-        dst_epsg = int(ds[datasets["epsg"]][()])
-        xcoord = ds[datasets["xcoord"]][xybbox[0] : xybbox[2]]
-        ycoord = ds[datasets["ycoord"]][xybbox[1] : xybbox[3]]
-
-        rdr_coords["xcoord_radar_grid"] = ds[PROCESSINFO["rdr_xcoord"]][()]
-        rdr_coords["ycoord_radar_grid"] = ds[PROCESSINFO["rdr_ycoord"]][()]
-        rdr_coords["height_radar_grid"] = ds[PROCESSINFO["rdr_height"]][()]
-        rdr_coords["slant_range"] = ds[PROCESSINFO["rdr_slant_range"]][()]
-        rdr_coords["incidence_angle"] = ds[PROCESSINFO["rdr_incidence"]][()]
-        rdr_coords["los_x"] = ds[PROCESSINFO["rdr_los_x"]][()]
-        rdr_coords["los_y"] = ds[PROCESSINFO["rdr_los_y"]][()]
-
-    # Warp DEM to exact grid
-    dem_subset_array = _warp_to_grid_mem(
-        src_path=dem_file,
-        src_epsg=dem_src_epsg,
-        dst_epsg=dst_epsg,
-        xcoord=xcoord,
-        ycoord=ycoord,
-        resample_alg="bilinear",
+    """Warp DEM to the interferogram grid and interpolate geometry layers."""
+    interp_ctx = _prepare_radar_grid_interpolation(
+        gunw_file,
+        dem_file,
+        xybbox,
+        polarization,
+        frequency,
+        {
+            "slant_range": "rdr_slant_range",
+            "incidence_angle": "rdr_incidence",
+            "los_x": "rdr_los_x",
+            "los_y": "rdr_los_y",
+        },
     )
-
-    # Build meshgrid in output CRS
-    Y_2d, X_2d = np.meshgrid(ycoord, xcoord, indexing="ij")
-
-    # Valid pixels from unwrappedPhase
-    valid = _read_valid_unw_mask(gunw_file, xybbox, polarization)
-
-    # Interpolate geometry at valid pixels only
     slant_range, incidence_angle, azimuth_angle = interpolate_geometry(
-        X_2d, Y_2d, dem_subset_array, rdr_coords, valid
+        interp_ctx["x_2d"],
+        interp_ctx["y_2d"],
+        interp_ctx["dem"],
+        interp_ctx["rdr_coords"],
+        interp_ctx["valid_mask"],
     )
 
-    # Mask handling (optional external mask warped to grid; otherwise ones)
-    if mask_file in ["auto", "None", None]:
-        mask_subset_array = np.ones(dem_subset_array.shape, dtype="byte")
-    else:
-        mask_src_epsg = _read_raster_epsg(mask_file)
-        mask_subset_array = _warp_to_grid_mem(
-            src_path=mask_file,
+    # Base mask comes from the native GUNW mask; external masks only refine it.
+    mask_subset_array = interp_ctx["valid_mask"].astype(bool)
+    if external_mask_file not in ["auto", "None", None, "no", ""]:
+        mask_src_epsg = _read_raster_epsg(external_mask_file)
+        external_mask = _warp_to_grid_mem(
+            src_path=external_mask_file,
             src_epsg=mask_src_epsg,
-            dst_epsg=dst_epsg,
-            xcoord=xcoord,
-            ycoord=ycoord,
+            dst_epsg=interp_ctx["dst_epsg"],
+            xcoord=interp_ctx["xcoord"],
+            ycoord=interp_ctx["ycoord"],
             resample_alg="near",
-        ).astype("byte")
+        ).astype(bool)
+        mask_subset_array &= external_mask
 
     return (
-        dem_subset_array,
+        interp_ctx["dem"],
         slant_range,
         incidence_angle,
         azimuth_angle,
@@ -662,38 +944,18 @@ def read_and_interpolate_geometry(
 
 def interpolate_geometry(X_2d, Y_2d, dem, rdr_coords, valid_mask):
     """Interpolate slant range, incidence angle, and azimuth angle at valid pixels only."""
-    length, width = Y_2d.shape
-    out_slant = np.full((length, width), np.nan, dtype=np.float32)
-    out_incid = np.full((length, width), np.nan, dtype=np.float32)
-    out_az = np.full((length, width), np.nan, dtype=np.float32)
+    shape, ii, jj, pts = _prepare_valid_interp_points(X_2d, Y_2d, dem, valid_mask)
+    out_slant = _empty_interp_array(shape)
+    out_incid = _empty_interp_array(shape)
+    out_az = _empty_interp_array(shape)
 
-    ii, jj = np.where(valid_mask)
-    if ii.size == 0:
+    if pts is None:
         return out_slant, out_incid, out_az
 
-    pts = np.column_stack(
-        [
-            dem[ii, jj].astype(np.float64),
-            Y_2d[ii, jj].astype(np.float64),
-            X_2d[ii, jj].astype(np.float64),
-        ]
-    )
-
-    grid = (
-        rdr_coords["height_radar_grid"],
-        rdr_coords["ycoord_radar_grid"],
-        rdr_coords["xcoord_radar_grid"],
-    )
-
-    slant_itp = _make_rgi(grid, rdr_coords["slant_range"], method="linear")
-    inc_itp = _make_rgi(grid, rdr_coords["incidence_angle"], method="linear")
-    losx_itp = _make_rgi(grid, rdr_coords["los_x"], method="linear")
-    losy_itp = _make_rgi(grid, rdr_coords["los_y"], method="linear")
-
-    sl = slant_itp(pts)
-    inc = inc_itp(pts)
-    losx = losx_itp(pts)
-    losy = losy_itp(pts)
+    sl = _interpolate_radar_grid_field(rdr_coords, "slant_range", pts)
+    inc = _interpolate_radar_grid_field(rdr_coords, "incidence_angle", pts)
+    losx = _interpolate_radar_grid_field(rdr_coords, "los_x", pts)
+    losy = _interpolate_radar_grid_field(rdr_coords, "los_y", pts)
 
     # Azimuth angle from horizontal LOS unit vector components.
     az = np.degrees(np.arctan2(-losy, -losx))
@@ -705,129 +967,78 @@ def interpolate_geometry(X_2d, Y_2d, dem, rdr_coords, valid_mask):
 
 
 def read_and_interpolate_troposphere(
-    gunw_file, dem_file, xybbox, polarization="HH", mask_file=None
+    gunw_file, dem_file, xybbox, polarization="HH", frequency="frequencyA"
 ):
     """Warp DEM to aligned grid and interpolate combined tropo at valid pixels only."""
-    dem_src_epsg = _read_raster_epsg(dem_file)
-    datasets = _datasets_for_pol(polarization)
-    rdr_coords = {}
-
-    with h5py.File(gunw_file, "r") as ds:
-        dst_epsg = int(ds[datasets["epsg"]][()])
-        xcoord = ds[datasets["xcoord"]][xybbox[0] : xybbox[2]]
-        ycoord = ds[datasets["ycoord"]][xybbox[1] : xybbox[3]]
-
-        rdr_coords["xcoord_radar_grid"] = ds[PROCESSINFO["rdr_xcoord"]][()]
-        rdr_coords["ycoord_radar_grid"] = ds[PROCESSINFO["rdr_ycoord"]][()]
-        rdr_coords["height_radar_grid"] = ds[PROCESSINFO["rdr_height"]][()]
-        rdr_coords["wet_tropo"] = ds[PROCESSINFO["rdr_wet_tropo"]][()]
-        rdr_coords["hydrostatic_tropo"] = ds[PROCESSINFO["rdr_hs_tropo"]][()]
-
-    dem_subset_array = _warp_to_grid_mem(
-        src_path=dem_file,
-        src_epsg=dem_src_epsg,
-        dst_epsg=dst_epsg,
-        xcoord=xcoord,
-        ycoord=ycoord,
-        resample_alg="bilinear",
+    interp_ctx = _prepare_radar_grid_interpolation(
+        gunw_file,
+        dem_file,
+        xybbox,
+        polarization,
+        frequency,
+        {
+            "wet_tropo": "rdr_wet_tropo",
+            "hydrostatic_tropo": "rdr_hs_tropo",
+        },
     )
-
-    Y_2d, X_2d = np.meshgrid(ycoord, xcoord, indexing="ij")
-    valid = _read_valid_unw_mask(gunw_file, xybbox, polarization)
-
     total_tropo = interpolate_troposphere(
-        X_2d, Y_2d, dem_subset_array, rdr_coords, valid
+        interp_ctx["x_2d"],
+        interp_ctx["y_2d"],
+        interp_ctx["dem"],
+        interp_ctx["rdr_coords"],
+        interp_ctx["valid_mask"],
     )
     return total_tropo
 
 
 def interpolate_troposphere(X_2d, Y_2d, dem, rdr_coords, valid_mask):
     """Interpolate total tropo (hydrostatic + wet) at valid pixels only."""
-    length, width = Y_2d.shape
-    out = np.full((length, width), np.nan, dtype=np.float32)
+    shape, ii, jj, pts = _prepare_valid_interp_points(X_2d, Y_2d, dem, valid_mask)
+    out = _empty_interp_array(shape)
 
-    ii, jj = np.where(valid_mask)
-    if ii.size == 0:
+    if pts is None:
         return out
 
-    pts = np.column_stack(
-        [
-            dem[ii, jj].astype(np.float64),
-            Y_2d[ii, jj].astype(np.float64),
-            X_2d[ii, jj].astype(np.float64),
-        ]
+    rdr_coords = dict(rdr_coords)
+    rdr_coords["total_tropo"] = (
+        rdr_coords["hydrostatic_tropo"] + rdr_coords["wet_tropo"]
     )
-
-    total = rdr_coords["hydrostatic_tropo"] + rdr_coords["wet_tropo"]
-    grid = (
-        rdr_coords["height_radar_grid"],
-        rdr_coords["ycoord_radar_grid"],
-        rdr_coords["xcoord_radar_grid"],
-    )
-    itp = _make_rgi(grid, total, method="linear")
-    val = itp(pts)
+    val = _interpolate_radar_grid_field(rdr_coords, "total_tropo", pts)
     out[ii, jj] = val.astype(np.float32)
     return out
 
 
 def read_and_interpolate_SET(
-    gunw_file, dem_file, xybbox, polarization="HH", mask_file=None
+    gunw_file, dem_file, xybbox, polarization="HH", frequency="frequencyA"
 ):
     """Warp DEM to aligned grid and interpolate SET phase at valid pixels only."""
-    dem_src_epsg = _read_raster_epsg(dem_file)
-    datasets = _datasets_for_pol(polarization)
-    rdr_coords = {}
-
-    with h5py.File(gunw_file, "r") as ds:
-        dst_epsg = int(ds[datasets["epsg"]][()])
-        xcoord = ds[datasets["xcoord"]][xybbox[0] : xybbox[2]]
-        ycoord = ds[datasets["ycoord"]][xybbox[1] : xybbox[3]]
-
-        rdr_coords["xcoord_radar_grid"] = ds[PROCESSINFO["rdr_xcoord"]][()]
-        rdr_coords["ycoord_radar_grid"] = ds[PROCESSINFO["rdr_ycoord"]][()]
-        rdr_coords["height_radar_grid"] = ds[PROCESSINFO["rdr_height"]][()]
-        rdr_coords["rdr_SET"] = ds[PROCESSINFO["rdr_SET"]][()]
-
-    dem_subset_array = _warp_to_grid_mem(
-        src_path=dem_file,
-        src_epsg=dem_src_epsg,
-        dst_epsg=dst_epsg,
-        xcoord=xcoord,
-        ycoord=ycoord,
-        resample_alg="bilinear",
+    interp_ctx = _prepare_radar_grid_interpolation(
+        gunw_file,
+        dem_file,
+        xybbox,
+        polarization,
+        frequency,
+        {"rdr_SET": "rdr_SET"},
     )
-
-    Y_2d, X_2d = np.meshgrid(ycoord, xcoord, indexing="ij")
-    valid = _read_valid_unw_mask(gunw_file, xybbox, polarization)
-
-    set_phase = interpolate_set(X_2d, Y_2d, dem_subset_array, rdr_coords, valid)
+    set_phase = interpolate_set(
+        interp_ctx["x_2d"],
+        interp_ctx["y_2d"],
+        interp_ctx["dem"],
+        interp_ctx["rdr_coords"],
+        interp_ctx["valid_mask"],
+    )
     return set_phase
 
 
 def interpolate_set(X_2d, Y_2d, dem, rdr_coords, valid_mask):
     """Interpolate SET phase at valid pixels only."""
-    length, width = Y_2d.shape
-    out = np.full((length, width), np.nan, dtype=np.float32)
+    shape, ii, jj, pts = _prepare_valid_interp_points(X_2d, Y_2d, dem, valid_mask)
+    out = _empty_interp_array(shape)
 
-    ii, jj = np.where(valid_mask)
-    if ii.size == 0:
+    if pts is None:
         return out
 
-    pts = np.column_stack(
-        [
-            dem[ii, jj].astype(np.float64),
-            Y_2d[ii, jj].astype(np.float64),
-            X_2d[ii, jj].astype(np.float64),
-        ]
-    )
-
-    grid = (
-        rdr_coords["height_radar_grid"],
-        rdr_coords["ycoord_radar_grid"],
-        rdr_coords["xcoord_radar_grid"],
-    )
-    itp = _make_rgi(grid, rdr_coords["rdr_SET"], method="linear")
-    val = itp(pts)
+    val = _interpolate_radar_grid_field(rdr_coords, "rdr_SET", pts)
     out[ii, jj] = val.astype(np.float32)
     return out
 
@@ -836,15 +1047,46 @@ def interpolate_set(X_2d, Y_2d, dem, rdr_coords, valid_mask):
 # MintPy file builders
 # ---------------------------------------------------------------------
 def _get_date_pairs(filenames):
-    str_list = [Path(f).stem for f in filenames]
-    return [
-        str(f.split("_")[11].split("T")[0]) + "_" + str(f.split("_")[13].split("T")[0])
-        for f in str_list
-    ]
+    """Return reference_secondary date pairs in YYYYMMDD_YYYYMMDD format."""
+    date12_list = []
+    for filename in filenames:
+        with h5py.File(filename, "r") as ds:
+            if (
+                f"{IDENTIFICATION}/referenceZeroDopplerStartTime" in ds
+                and f"{IDENTIFICATION}/secondaryZeroDopplerStartTime" in ds
+            ):
+                ref_time = ds[f"{IDENTIFICATION}/referenceZeroDopplerStartTime"][()]
+                sec_time = ds[f"{IDENTIFICATION}/secondaryZeroDopplerStartTime"][()]
+                ref_date = ref_time.decode("utf-8").split("T")[0].replace("-", "")
+                sec_date = sec_time.decode("utf-8").split("T")[0].replace("-", "")
+                date12_list.append(f"{ref_date}_{sec_date}")
+                continue
+
+        parts = Path(filename).stem.split("_")
+        if len(parts) > 13:
+            date12_list.append(
+                f"{parts[11].split('T')[0]}_{parts[13].split('T')[0]}"
+            )
+            continue
+
+        raise ValueError(
+            f"Could not determine reference/secondary dates from {filename}. "
+            "Expected NISAR identification zero-Doppler start times or an "
+            "OPERA-style filename."
+        )
+
+    return date12_list
 
 
 def prepare_geometry(
-    outfile, metaFile, metadata, bbox, demFile, maskFile, polarization="HH"
+    outfile,
+    metaFile,
+    metadata,
+    bbox,
+    demFile,
+    externalMaskFile,
+    polarization="HH",
+    frequency="frequencyA",
 ):
     """Prepare the geometry file."""
     print("-" * 50)
@@ -852,14 +1094,17 @@ def prepare_geometry(
 
     meta = {key: value for key, value in metadata.items()}
 
-    geo_ds = read_subset(metaFile, bbox, polarization=polarization, geometry=True)
+    geo_ds = read_subset(
+        metaFile, bbox, polarization=polarization, frequency=frequency, geometry=True
+    )
     dem_subset_array, slant_range, incidence_angle, azimuth_angle, mask = (
         read_and_interpolate_geometry(
             metaFile,
             demFile,
             geo_ds["xybbox"],
             polarization=polarization,
-            mask_file=maskFile,
+            frequency=frequency,
+            external_mask_file=externalMaskFile,
         )
     )
 
@@ -870,13 +1115,11 @@ def prepare_geometry(
         "slantRangeDistance": [np.float32, (length, width), slant_range],
         "azimuthAngle": [np.float32, (length, width), azimuth_angle],
     }
-    if maskFile:
-        valid = _read_valid_unw_mask(metaFile, geo_ds["xybbox"], polarization)
-        ds_name_dict["waterMask"] = [
-            np.bool_,
-            (length, width),
-            mask.astype(bool) & valid,
-        ]
+    ds_name_dict["waterMask"] = [
+        np.bool_,
+        (length, width),
+        mask.astype(bool),
+    ]
 
     meta["FILE_TYPE"] = "geometry"
     meta["STARTING_RANGE"] = float(np.nanmin(slant_range))
@@ -884,44 +1127,45 @@ def prepare_geometry(
     return meta
 
 
-def prepare_water_mask(outfile, metaFile, metadata, bbox, maskFile, polarization="HH"):
-    """Prepare a standalone MintPy waterMask.h5 aligned to the NISAR grid."""
+def prepare_water_mask(
+    outfile,
+    metaFile,
+    metadata,
+    bbox,
+    externalMaskFile,
+    polarization="HH",
+    frequency="frequencyA",
+):
+    """Prepare a standalone MintPy waterMask.h5 from the GUNW mask."""
     print("-" * 50)
     print(f"preparing water mask file: {outfile}")
-
-    if not maskFile or maskFile in ["auto", "None", None]:
-        raise ValueError("maskFile must be a raster path (e.g., waterMask.msk)")
 
     meta = {key: value for key, value in metadata.items()}
 
     # get subset indices
-    geo_ds = read_subset(metaFile, bbox, polarization=polarization, geometry=True)
+    geo_ds = read_subset(
+        metaFile, bbox, polarization=polarization, frequency=frequency, geometry=True
+    )
     xybbox = geo_ds["xybbox"]
 
-    # get target grid axes + EPSG from the NISAR file
-    datasets = _datasets_for_pol(polarization)
-    with h5py.File(metaFile, "r") as ds:
-        dst_epsg = int(ds[datasets["epsg"]][()])
-        xcoord = ds[datasets["xcoord"]][xybbox[0] : xybbox[2]]
-        ycoord = ds[datasets["ycoord"]][xybbox[1] : xybbox[3]]
+    water_mask_bool = _read_is_land_and_valid_mask(
+        metaFile, xybbox, polarization, frequency
+    )
 
-    # warp mask raster onto NISAR grid
-    mask_src_epsg = _read_raster_epsg(maskFile)
-    mask_arr = _warp_to_grid_mem(
-        src_path=maskFile,
-        src_epsg=mask_src_epsg,
-        dst_epsg=dst_epsg,
-        xcoord=xcoord,
-        ycoord=ycoord,
-        resample_alg="near",
-    ).astype("byte")
-
-    # Convention in this script: nonzero => True (valid), 0 => False (masked)
-    water_mask_bool = mask_arr.astype(bool)
-
-    # constrain to valid NISAR pixels (finite/unfilled unwrappedPhase)
-    valid = _read_valid_unw_mask(metaFile, xybbox, polarization)
-    water_mask_bool &= valid
+    if externalMaskFile not in ["auto", "None", None, "no", ""]:
+        dst_epsg, xcoord, ycoord = _read_target_grid(
+            metaFile, xybbox, polarization, frequency
+        )
+        mask_src_epsg = _read_raster_epsg(externalMaskFile)
+        external_mask = _warp_to_grid_mem(
+            src_path=externalMaskFile,
+            src_epsg=mask_src_epsg,
+            dst_epsg=dst_epsg,
+            xcoord=xcoord,
+            ycoord=ycoord,
+            resample_alg="near",
+        ).astype(bool)
+        water_mask_bool &= external_mask
 
     length, width = water_mask_bool.shape
     ds_name_dict = {"waterMask": [np.bool_, (length, width), water_mask_bool]}
@@ -942,14 +1186,40 @@ def prepare_stack(
     bbox,
     date12_list,
     polarization="HH",
+    frequency="frequencyA",
+    stack_type=None,
 ):
     """Prepare the input stacks."""
+    effective_stack_type = _resolve_stack_type(stack_type, outfile)
     print("-" * 50)
-    print(f"preparing ifgramStack file: {outfile}")
+    print(f"preparing {effective_stack_type} stack file: {outfile}")
 
     meta = {key: value for key, value in metadata.items()}
     num_pair = len(inp_files)
     print(f"number of inputs/unwrapped interferograms: {num_pair}")
+
+    missing = _missing_required_paths(
+        inp_files, effective_stack_type, polarization, frequency
+    )
+    if missing:
+        first_file, first_path = missing[0]
+        message = (
+            f"required NISAR {effective_stack_type} layer is missing: "
+            f"{first_path} in {first_file}"
+        )
+        if effective_stack_type == "ifgram":
+            raise FileNotFoundError(message)
+
+        print(f"WARNING: skipping {effective_stack_type} stack because {message}")
+        for missing_file, missing_path in missing[1:]:
+            print(
+                f"WARNING: skipping {effective_stack_type} stack because "
+                f"required NISAR {effective_stack_type} layer is missing: "
+                f"{missing_path} in {missing_file}"
+            )
+        if os.path.exists(outfile):
+            print(f"WARNING: existing stack file was not updated: {outfile}")
+        return None
 
     pbase = np.zeros(num_pair, dtype=np.float32)
     cols = int(meta["WIDTH"])
@@ -967,66 +1237,28 @@ def prepare_stack(
         "connectComponent": [np.float32, (num_pair, rows, cols), None],
     }
 
-    if "inputs/geometryGeo.h5" in outfile:
-        meta["FILE_TYPE"] = "geometry"
-    else:
-        meta["FILE_TYPE"] = "ifgramStack"
+    meta["FILE_TYPE"] = "ifgramStack"
 
     writefile.layout_hdf5(outfile, ds_name_dict, metadata=meta)
 
     print(f"writing data to HDF5 file {outfile} with a mode ...")
+    with h5py.File(outfile, "a") as f:
+        prog_bar = ptime.progressBar(maxValue=num_pair)
+        for i, file in enumerate(inp_files):
+            obs = _read_stack_observation(
+                file, effective_stack_type, bbox, demFile, polarization, frequency
+            )
+            f["unwrapPhase"][i] = obs["unwrap_phase"]
 
-    if "inputs/ifgramStack.h5" in outfile:
-        with h5py.File(outfile, "a") as f:
-            prog_bar = ptime.progressBar(maxValue=num_pair)
-            for i, file in enumerate(inp_files):
-                dataset = read_subset(file, bbox, polarization=polarization)
-                f["unwrapPhase"][i] = dataset["unw_data"]
-                f["coherence"][i] = dataset["cor_data"]
-                f["connectComponent"][i] = dataset["conn_comp"]
-                f["bperp"][i] = dataset["pbase"]
-                prog_bar.update(i + 1, suffix=date12_list[i])
-            prog_bar.close()
+            if "coherence" in obs:
+                f["coherence"][i] = obs["coherence"]
+                f["connectComponent"][i] = obs["connect_component"]
 
-    elif "inputs/ionStack.h5" in outfile:
-        with h5py.File(outfile, "a") as f:
-            prog_bar = ptime.progressBar(maxValue=num_pair)
-            for i, file in enumerate(inp_files):
-                dataset = read_subset(file, bbox, polarization=polarization)
-                f["unwrapPhase"][i] = dataset["ion_data"]
-                f["coherence"][i] = dataset["cor_data"]
-                f["connectComponent"][i] = dataset["conn_comp"]
-                f["bperp"][i] = dataset["pbase"]
-                prog_bar.update(i + 1, suffix=date12_list[i])
-            prog_bar.close()
+            if "pbase" in obs:
+                f["bperp"][i] = obs["pbase"]
 
-    elif "inputs/tropoStack.h5" in outfile:
-        with h5py.File(outfile, "a") as f:
-            prog_bar = ptime.progressBar(maxValue=num_pair)
-            for i, file in enumerate(inp_files):
-                geo_ds = read_subset(
-                    file, bbox, polarization=polarization, geometry=True
-                )
-                total_tropo = read_and_interpolate_troposphere(
-                    file, demFile, geo_ds["xybbox"], polarization=polarization
-                )
-                f["unwrapPhase"][i] = total_tropo
-                prog_bar.update(i + 1, suffix=date12_list[i])
-            prog_bar.close()
-
-    elif "inputs/setStack.h5" in outfile:
-        with h5py.File(outfile, "a") as f:
-            prog_bar = ptime.progressBar(maxValue=num_pair)
-            for i, file in enumerate(inp_files):
-                geo_ds = read_subset(
-                    file, bbox, polarization=polarization, geometry=True
-                )
-                set_phase = read_and_interpolate_SET(
-                    file, demFile, geo_ds["xybbox"], polarization=polarization
-                )
-                f["unwrapPhase"][i] = set_phase
-                prog_bar.update(i + 1, suffix=date12_list[i])
-            prog_bar.close()
+            prog_bar.update(i + 1, suffix=date12_list[i])
+        prog_bar.close()
 
     print(f"finished writing to HDF5 file: {outfile}")
     return outfile
