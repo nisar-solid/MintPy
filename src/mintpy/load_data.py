@@ -636,6 +636,23 @@ def prepare_metadata(iDict):
         dem_file = iDict['mintpy.load.demFile']
         gunw_files = iDict['mintpy.load.unwFile']
         water_mask = iDict['mintpy.load.waterMaskFile']
+        frequency = iDict.get('mintpy.load.frequency', 'auto')
+
+        if str(dem_file).lower() in ['auto', 'none', 'no', '']:
+            raise ValueError(
+                'mintpy.load.demFile is required for processor=nisar. '
+                'Please set it to a real DEM path in the template.'
+            )
+        dem_file = os.path.expanduser(str(dem_file))
+        if not os.path.isfile(dem_file):
+            raise FileNotFoundError(
+                f'No DEM file found for mintpy.load.demFile: {dem_file}'
+            )
+
+        if len(glob.glob(str(gunw_files))) == 0:
+            raise FileNotFoundError(
+                f'No input GUNW files found for mintpy.load.unwFile: {gunw_files}'
+            )
 
         if str(dem_file).lower() in ['auto', 'none', 'no', '']:
             raise ValueError(
@@ -655,7 +672,7 @@ def prepare_metadata(iDict):
             )
 
         # run prep_*.py
-        iargs = ['-i', gunw_files, '-d', dem_file]
+        iargs = ['-i', gunw_files, '-d', dem_file, '--frequency', frequency]
 
         if str(water_mask).lower() not in ['auto', 'none', 'no', ''] and os.path.exists(water_mask):
             iargs = iargs + ['--mask', water_mask]
