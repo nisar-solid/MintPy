@@ -902,10 +902,9 @@ def get_raster_corners(input_file, polarization="HH", frequency="frequencyA"):
     with h5py.File(input_file, "r") as ds:
         xcoord = ds[datasets["xcoord"]][:]
         ycoord = ds[datasets["ycoord"]][:]
-        west = max(np.min(ds[PROCESSINFO["rdr_xcoord"]][:]), np.min(xcoord))
-        east = min(np.max(ds[PROCESSINFO["rdr_xcoord"]][:]), np.max(xcoord))
-        north = min(np.max(ds[PROCESSINFO["rdr_ycoord"]][:]), np.max(ycoord))
-        south = max(np.min(ds[PROCESSINFO["rdr_ycoord"]][:]), np.min(ycoord))
+
+    bounds, _, _ = _grid_bounds_from_xy(xcoord, ycoord)
+    west, south, east, north = bounds
     return float(west), float(south), float(east), float(north)
 
 
