@@ -18,7 +18,7 @@ from pyproj import Transformer
 from scipy.interpolate import RegularGridInterpolator
 
 from mintpy.constants import EARTH_RADIUS, SPEED_OF_LIGHT
-from mintpy.utils import attribute as attr, ptime, writefile
+from mintpy.utils import attribute as attr, ptime, utils0 as ut, writefile
 
 # ---------------------------------------------------------------------
 # Constants / HDF5 paths
@@ -801,14 +801,7 @@ def extract_metadata(input_files, bbox=None, polarization="HH", frequency="frequ
     meta["X_STEP"] = float(pixel_width)
     meta["Y_STEP"] = float(pixel_height)
 
-    if meta["EPSG"] == 4326:
-        meta["X_UNIT"] = meta["Y_UNIT"] = "degree"
-    else:
-        meta["X_UNIT"] = meta["Y_UNIT"] = "meters"
-        if str(meta["EPSG"]).startswith("326"):
-            meta["UTM_ZONE"] = str(meta["EPSG"])[3:] + "N"
-        else:
-            meta["UTM_ZONE"] = str(meta["EPSG"])[3:] + "S"
+    _set_projection_metadata(meta)
     meta["EARTH_RADIUS"] = EARTH_RADIUS
 
     # NISAR altitude
@@ -839,6 +832,16 @@ def extract_metadata(input_files, bbox=None, polarization="HH", frequency="frequ
     meta = _coerce_subset_metadata_types(meta)
 
     return meta, bounds
+
+
+def _set_projection_metadata(meta):
+    """Populate coordinate-unit metadata and optional UTM zone from EPSG."""
+    if int(meta["EPSG"]) == 4326:
+        meta["X_UNIT"] = meta["Y_UNIT"] = "degree"
+    else:
+        meta["X_UNIT"] = meta["Y_UNIT"] = "meters"
+        if str(meta["EPSG"]).startswith(("326", "327")):
+            meta["UTM_ZONE"] = ut.epsg_code2utm_zone(meta["EPSG"])
 
 
 def get_rows_cols(xcoord, ycoord, bounds):

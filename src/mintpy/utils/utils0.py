@@ -334,6 +334,51 @@ def epsg_code2utm_zone(epsg_code):
     return utm_zone
 
 
+def _metadata_value_exists(meta, key):
+    """Return True if the metadata key exists and carries a usable value."""
+    value = meta.get(key, None)
+    return value not in [None, '', 'None', 'none']
+
+
+def _format_transform_output(ref1, ref2, out1, out2):
+    """Match transform output type to the input coordinate type."""
+    if any(isinstance(x, (list, tuple)) for x in [ref1, ref2]):
+        return out1.tolist(), out2.tolist()
+
+    if np.isscalar(ref1) and np.isscalar(ref2):
+        return np.asarray(out1).item(), np.asarray(out2).item()
+
+    return out1, out2
+
+
+def get_utm_zone(meta):
+    """Return the UTM zone for metadata, or None for a non-UTM CRS."""
+    if _metadata_value_exists(meta, 'EPSG'):
+        return epsg_code2utm_zone(int(meta['EPSG']))
+
+    if _metadata_value_exists(meta, 'UTM_ZONE'):
+        return meta['UTM_ZONE']
+
+    return None
+
+
+def get_epsg_code(meta):
+    """Return the EPSG code for metadata, or None if unavailable."""
+    if _metadata_value_exists(meta, 'EPSG'):
+        return int(meta['EPSG'])
+
+    utm_zone = get_utm_zone(meta)
+    if utm_zone:
+        return int(utm_zone2epsg_code(utm_zone))
+
+    return None
+
+
+def is_utm_crs(meta):
+    """Return True if the metadata represents a true UTM CRS."""
+    return get_utm_zone(meta) is not None
+
+
 def to_latlon(infile, x, y):
     """Convert x, y in the projection coordinates of the file to lat/lon in degree.
 
@@ -375,8 +420,12 @@ def utm2latlon(meta, easting, northing):
                 lon      - scalar/list/tuple/1-2D np.ndarray, WGS 84 coordinates in x direction
     """
     import utm
-    zone_num = int(meta['UTM_ZONE'][:-1])
-    northern = meta['UTM_ZONE'][-1].upper() == 'N'
+    utm_zone = get_utm_zone(meta)
+    if utm_zone is None:
+        raise ValueError('Input metadata is NOT in a UTM CRS.')
+
+    zone_num = int(utm_zone[:-1])
+    northern = utm_zone[-1].upper() == 'N'
     # set 'strict=False' to allow coordinates outside the range of a typical single UTM zone,
     # which can be common for large area analysis, e.g. the Norwegian mapping authority
     # publishes a height data in UTM zone 33 coordinates for the whole country, even though
@@ -384,12 +433,7 @@ def utm2latlon(meta, easting, northing):
     lat, lon = utm.to_latlon(np.array(easting), np.array(northing), zone_num,
                              northern=northern, strict=False)
 
-    # output format
-    if any(isinstance(x, (list, tuple)) for x in [easting, northing]):
-        lat = lat.tolist()
-        lon = lon.tolist()
-
-    return lat, lon
+    return _format_transform_output(easting, northing, lat, lon)
 
 
 def latlon2utm(meta, lat, lon):
@@ -406,15 +450,48 @@ def latlon2utm(meta, lat, lon):
 
     # invoke zone_num to ensure all coordinates are converted into the same single UTM zone,
     # even if they cross a UTM boundary.
-    zone_num = int(meta['UTM_ZONE'][:-1])
+    utm_zone = get_utm_zone(meta)
+    if utm_zone is None:
+        raise ValueError('Input metadata is NOT in a UTM CRS.')
+
+    zone_num = int(utm_zone[:-1])
     easting, northing = utm.from_latlon(np.array(lat), np.array(lon), force_zone_number=zone_num)[:2]
 
-    # output format
-    if any(isinstance(x, (list, tuple)) for x in [lat, lon]):
-        easting = easting.tolist()
-        northing = northing.tolist()
+    return _format_transform_output(lat, lon, northing, easting)
 
-    return northing, easting
+
+def projected2latlon(meta, easting, northing):
+    """Convert projected x/y coordinates into lat/lon using metadata EPSG."""
+    from pyproj import CRS, Transformer
+
+    epsg_code = get_epsg_code(meta)
+    if epsg_code is None:
+        raise ValueError('No EPSG or UTM metadata found for projected-to-lat/lon conversion.')
+
+    transformer = Transformer.from_crs(
+        CRS.from_epsg(epsg_code),
+        CRS.from_epsg(4326),
+        always_xy=True,
+    )
+    lon, lat = transformer.transform(np.array(easting), np.array(northing))
+    return _format_transform_output(easting, northing, lat, lon)
+
+
+def latlon2projected(meta, lat, lon):
+    """Convert lat/lon into projected x/y coordinates using metadata EPSG."""
+    from pyproj import CRS, Transformer
+
+    epsg_code = get_epsg_code(meta)
+    if epsg_code is None:
+        raise ValueError('No EPSG or UTM metadata found for lat/lon-to-projected conversion.')
+
+    transformer = Transformer.from_crs(
+        CRS.from_epsg(4326),
+        CRS.from_epsg(epsg_code),
+        always_xy=True,
+    )
+    easting, northing = transformer.transform(np.array(lon), np.array(lat))
+    return _format_transform_output(lat, lon, northing, easting)
 
 
 def snwe_to_wkt_polygon(snwe):
@@ -484,10 +561,14 @@ def get_lat_lon(meta, geom_file=None, box=None, dimension=2, ystep=1, xstep=1):
         else:
             raise ValueError(f'un-supported dimension = {dimension}')
 
-        # UTM to lat/lon
-        if not meta['Y_UNIT'].startswith('deg') and 'UTM_ZONE' in meta.keys():
-            print('UTM coordinates detected, convert UTM into lat/lon')
-            lats, lons = utm2latlon(meta, easting=lons, northing=lats)
+        # projected x/y to lat/lon
+        if not meta.get('Y_UNIT', 'degrees').lower().startswith('deg'):
+            if is_utm_crs(meta):
+                print('UTM coordinates detected, convert UTM into lat/lon')
+                lats, lons = utm2latlon(meta, easting=lons, northing=lats)
+            elif get_epsg_code(meta) is not None:
+                print('Projected coordinates detected, convert projected x/y into lat/lon')
+                lats, lons = projected2latlon(meta, easting=lons, northing=lats)
 
     else:
         msg = 'Can not get pixel-wise lat/lon!'

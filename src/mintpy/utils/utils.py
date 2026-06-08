@@ -490,9 +490,9 @@ def prepare_geo_los_geometry(geom_file, unit='rad'):
         S = N + y_step * length
         E = W + x_step * width
 
-        # SNWE in meter --> degree
-        lat0, lon0 = utm2latlon(atr, W, N)
-        lat1, lon1 = utm2latlon(atr, E, S)
+        # projected x/y --> degree
+        lat0, lon0 = projected2latlon(atr, W, N)
+        lat1, lon1 = projected2latlon(atr, E, S)
         lat_step = (lat1 - lat0) / length
         lon_step = (lon1 - lon0) / width
 

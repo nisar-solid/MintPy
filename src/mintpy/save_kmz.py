@@ -233,10 +233,10 @@ def write_kmz_overlay(data, meta, out_file, inps):
     """
 
     south, north, west, east = ut.four_corners(meta)
-    # convert from UTM to WGS84 when necessary, as KML only natively supports WGS84
-    if "UTM_ZONE" in meta.keys():
-        north, east = ut.utm2latlon(meta, east, north)
-        south, west = ut.utm2latlon(meta, west, south)
+    # convert projected coordinates to WGS84, as KML only natively supports WGS84
+    if not meta.get('Y_UNIT', 'degrees').lower().startswith('deg'):
+        north, east = ut.projected2latlon(meta, east, north)
+        south, west = ut.projected2latlon(meta, west, south)
 
     # 1. Make PNG file - Data
     print('plotting data ...')
