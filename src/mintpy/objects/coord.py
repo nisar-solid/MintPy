@@ -128,7 +128,8 @@ class coordinate:
         lat_in, lon_in = self._clean_coord(lat_in, lon_in)
 
         # convert lat/lon to projected coordinates if needed.
-        if (lat_in is not None and lon_in is not None
+        if (all(i is not None for i in lat_in)
+                and all(i is not None for i in lon_in)
                 and not self.src_metadata.get('Y_UNIT', 'degrees').lower().startswith('deg')
                 and ut0.get_epsg_code(self.src_metadata) is not None
                 and np.max(np.abs(lat_in)) <= 90
