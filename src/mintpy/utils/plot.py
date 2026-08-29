@@ -1305,10 +1305,10 @@ def plot_gnss(ax, SNWE, inps, metadata=dict(), print_msg=True):
     start_date = inps.gnss_start_date if inps.gnss_start_date else metadata.get('START_DATE', None)
     end_date = inps.gnss_end_date if inps.gnss_end_date else metadata.get('END_DATE', None)
 
-    # pre-query: convert UTM to lat/lon for query
-    if 'UTM_ZONE' in metadata.keys():
-        south, west = ut0.utm2latlon(atr, SNWE[2], SNWE[0])
-        north, east = ut0.utm2latlon(atr, SNWE[3], SNWE[1])
+    # pre-query: convert projected x/y to lat/lon for query
+    if not metadata.get('Y_UNIT', 'degrees').lower().startswith('deg'):
+        south, west = ut0.projected2latlon(atr, SNWE[2], SNWE[0])
+        north, east = ut0.projected2latlon(atr, SNWE[3], SNWE[1])
         SNWE = (south, north, west, east)
 
     # query for GNSS stations
@@ -1343,9 +1343,9 @@ def plot_gnss(ax, SNWE, inps, metadata=dict(), print_msg=True):
     vprint(f'GNSS source: {gnss_obj.source}')
     vprint(f'GNSS reference frame: {gnss_obj.version}')
 
-    # post-query: convert lat/lon to UTM for plotting
-    if 'UTM_ZONE' in metadata.keys():
-        site_lats, site_lons = ut0.latlon2utm(metadata, site_lats, site_lons)
+    # post-query: convert lat/lon to projected x/y for plotting
+    if not metadata.get('Y_UNIT', 'degrees').lower().startswith('deg'):
+        site_lats, site_lons = ut0.latlon2projected(metadata, site_lats, site_lons)
 
     # mask out stations not coincident with InSAR data
     if inps.mask_gnss and inps.msk is not None:

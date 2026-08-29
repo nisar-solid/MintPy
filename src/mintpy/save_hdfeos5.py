@@ -127,9 +127,9 @@ def metadata_mintpy2unavco(meta_in, dateList, geom_file):
             float(meta['LAT_REF2']),
             float(meta['LAT_REF1'])]
 
-    # convert UTM to lat/lon
+    # convert projected coordinates to lat/lon
     if not meta_in.get('Y_UNIT', 'degrees').lower().startswith('deg'):
-        lats, lons = ut.utm2latlon(meta_in, easting=lons, northing=lats)
+        lats, lons = ut.projected2latlon(meta_in, easting=lons, northing=lats)
 
     unavco_meta['scene_footprint'] = "POLYGON((" + ",".join(
         [f'{lon} {lat}' for lon, lat in zip(lons, lats)]) + "))"
@@ -243,9 +243,13 @@ def get_output_filename(metadata, suffix=None, update_mode=False, subset_mode=Fa
         lat0 = lat1 + float(metadata['Y_STEP']) * int(metadata['LENGTH'])
         lon1 = lon0 + float(metadata['X_STEP']) * int(metadata['WIDTH'])
 
-        # convert UTM to lat/lon
+        # convert projected coordinates to lat/lon
         if not metadata.get('Y_UNIT', 'degrees').lower().startswith('deg'):
-            [lat0, lat1], [lon0, lon1] = ut.utm2latlon(metadata, easting=[lon0, lon1], northing=[lat0, lat1])
+            [lat0, lat1], [lon0, lon1] = ut.projected2latlon(
+                metadata,
+                easting=[lon0, lon1],
+                northing=[lat0, lat1],
+            )
 
         lat0Str = f'N{round(lat0*1e3):05d}'
         lat1Str = f'N{round(lat1*1e3):05d}'
