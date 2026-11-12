@@ -127,12 +127,18 @@ class coordinate:
 
         lat_in, lon_in = self._clean_coord(lat_in, lon_in)
 
-        # attempts to convert lat/lon to utm coordinates if needed.
-        if (lat_in is not None and lon_in is not None
-                and 'UTM_ZONE' in self.src_metadata
+        # convert lat/lon to projected coordinates if needed.
+        if (all(i is not None for i in lat_in)
+                and all(i is not None for i in lon_in)
+                and not self.src_metadata.get('Y_UNIT', 'degrees').lower().startswith('deg')
+                and ut0.get_epsg_code(self.src_metadata) is not None
                 and np.max(np.abs(lat_in)) <= 90
                 and np.max(np.abs(lon_in)) <= 360):
-            lat_in, lon_in = ut0.latlon2utm(self.src_metadata, np.array(lat_in), np.array(lon_in))
+            lat_in, lon_in = ut0.latlon2projected(
+                self.src_metadata,
+                np.array(lat_in),
+                np.array(lon_in),
+            )
 
         # convert coordinates
         y_out = []
@@ -297,11 +303,16 @@ class coordinate:
                 else:
                     lon[lon > 180.] -= 360
 
-        # check 2: attempts to convert lat/lon to utm coordinates if needed
-        if ('UTM_ZONE' in self.src_metadata
+        # check 2: convert lat/lon to projected coordinates if needed
+        if (not self.src_metadata.get('Y_UNIT', 'degrees').lower().startswith('deg')
+                and ut0.get_epsg_code(self.src_metadata) is not None
                 and np.max(np.abs(lat)) <= 90
                 and np.max(np.abs(lon)) <= 360):
-            lat, lon = ut0.latlon2utm(self.src_metadata, np.array(lat), np.array(lon))
+            lat, lon = ut0.latlon2projected(
+                self.src_metadata,
+                np.array(lat),
+                np.array(lon),
+            )
 
         self.open()
         if self.geocoded:

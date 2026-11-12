@@ -338,10 +338,10 @@ def get_bounding_box(meta, geom_file=None):
         lat1 = lat0 + lat_step * (length - 1)
         lon1 = lon0 + lon_step * (width - 1)
 
-        # for UTM projection, e.g. ASF HyP3
+        # for projected geo grids, e.g. UTM / Polar Stereographic
         if not meta.get('Y_UNIT', 'degrees').lower().startswith('deg'):
-            lat0, lon0 = ut.utm2latlon(meta, easting=lon0, northing=lat0)
-            lat1, lon1 = ut.utm2latlon(meta, easting=lon1, northing=lat1)
+            lat0, lon0 = ut.projected2latlon(meta, easting=lon0, northing=lat0)
+            lat1, lon1 = ut.projected2latlon(meta, easting=lon1, northing=lat1)
 
     else:
         # radar coordinates
@@ -364,9 +364,9 @@ def get_bounding_box(meta, geom_file=None):
             # use the rough (not accurate) lat/lon info of the four corners
             lats = [float(meta[f'LAT_REF{i}']) for i in [1,2,3,4]]
             lons = [float(meta[f'LON_REF{i}']) for i in [1,2,3,4]]
-            # for UTM projection, e.g. ASF HyP3
+            # for projected geo grids, e.g. UTM / Polar Stereographic
             if not meta.get('Y_UNIT', 'degrees').lower().startswith('deg'):
-                lats, lons = ut.utm2latlon(meta, easting=lons, northing=lats)
+                lats, lons = ut.projected2latlon(meta, easting=lons, northing=lats)
             lat0 = np.mean(lats[0:2])
             lat1 = np.mean(lats[2:4])
             lon0 = np.mean(lons[0:3:2])

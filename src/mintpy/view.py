@@ -217,6 +217,15 @@ def check_map_projection(inps, metadata, print_msg=True):
                 if inps.lalo_label:
                     raise ValueError('--lalo-label is NOT supported for projection: UTM')
 
+            elif metadata.get('EPSG', None):
+                try:
+                    inps.map_proj_obj = ccrs.epsg(int(metadata['EPSG']))
+                    print(msg + f'EPSG {metadata["EPSG"]}')
+                except Exception:
+                    print(f'WARNING: Failed to initialize cartopy projection for EPSG {metadata["EPSG"]}')
+                    print('    Switch to the native Y/X and continue to plot')
+                    inps.fig_coord = 'yx'
+
             else:
                 print(f'WARNING: Un-recognized coordinate unit: {inps.coord_unit}')
                 print('    Switch to the native Y/X and continue to plot')
